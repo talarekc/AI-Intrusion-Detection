@@ -351,5 +351,5 @@ display_df = filtered[filtered["Classification"] != "Benign"][["Timestamp", "Sou
 st.dataframe(
     display_df.style.format({"Confidence": "{:.0%}", "Timestamp": lambda x: x.strftime("%Y-%m-%d %H:%M")}),
     use_container_width=True,
-    height=400
+    height=600
 )
