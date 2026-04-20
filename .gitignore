@@ -11,5 +11,8 @@ __pycache__/
 # Environment files
 .env
 
+# Claude Code local config
+.claude/
+
 # Large data files
 *.csv
