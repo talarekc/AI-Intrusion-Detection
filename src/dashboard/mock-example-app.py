@@ -317,7 +317,7 @@ with left:
     fig1.update_traces(marker_line_width=0)
     fig1.update_xaxes(gridcolor="#1e293b")
     fig1.update_yaxes(gridcolor="#1e293b")
-    st.plotly_chart(fig1, use_container_width=True)
+    st.plotly_chart(fig1, use_container_width=True, config={"displayModeBar": False})
 
 with right:
     st.markdown('<div class="section-title">Threat Distribution</div>', unsafe_allow_html=True)
@@ -329,7 +329,7 @@ with right:
     )
     fig2.update_layout(**chart_layout)
     fig2.update_traces(textfont_color="#e2e8f0", textinfo="percent+label")
-    st.plotly_chart(fig2, use_container_width=True)
+    st.plotly_chart(fig2, use_container_width=True, config={"displayModeBar": False})
 
 # Timeline chart
 st.markdown('<div class="section-title">Threat Activity (Last 24 Hours)</div>', unsafe_allow_html=True)
@@ -343,7 +343,7 @@ fig3 = px.area(
 fig3.update_layout(**chart_layout, height=300)
 fig3.update_xaxes(gridcolor="#1e293b")
 fig3.update_yaxes(gridcolor="#1e293b")
-st.plotly_chart(fig3, use_container_width=True)
+st.plotly_chart(fig3, use_container_width=True, config={"displayModeBar": False})
 
 # Alert log
 st.markdown('<div class="section-title">Alert Log</div>', unsafe_allow_html=True)
