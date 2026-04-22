@@ -556,10 +556,11 @@ LIVE_MAP_HTML = """
 
       livePackets.forEach(p => {
         const age = now - p.ts;
-        const drawing = age < DRAW_MS;
         const rawProgress = Math.min(1, age / DRAW_MS);
         const progress = easeOut(rawProgress);
-        const opacity = drawing ? 1.0 : Math.max(0, 1 - (age - DRAW_MS) / FADE_MS);
+        const drawing = progress < 0.99;
+        if (!drawing && !p.arrivedAt) p.arrivedAt = now;
+        const opacity = drawing ? 1.0 : Math.max(0, 1 - (now - p.arrivedAt) / FADE_MS);
         if (opacity <= 0) return;
 
         // Slice the bezier path up to current progress; convert [lat,lon] -> [lon,lat] for deck
@@ -574,9 +575,17 @@ LIVE_MAP_HTML = """
 
         sources.push({ position: p.src, opacity });
 
+        const HEAD_FADE_MS = 250;
         if (drawing) {
           const head = p.path[lastIdx];
-          heads.push({ position: [head[1], head[0]], color: colorMap[p.attack] });
+          heads.push({ position: [head[1], head[0]], color: colorMap[p.attack], opacity: 1.0 });
+        } else {
+          const headOpacity = Math.max(0, 1 - (now - p.arrivedAt) / HEAD_FADE_MS);
+          if (headOpacity > 0) {
+            const N = p.path.length - 1;
+            const head = p.path[N];
+            heads.push({ position: [head[1], head[0]], color: colorMap[p.attack], opacity: headOpacity });
+          }
         }
       });
 
@@ -607,8 +616,8 @@ LIVE_MAP_HTML = """
         id: "heads",
         data: heads,
         getPosition: d => d.position,
-        getFillColor: d => [...d.color, 255],
-        getLineColor: [255, 255, 255, 230],
+        getFillColor: d => [...d.color, Math.round(255 * d.opacity)],
+        getLineColor: d => [255, 255, 255, Math.round(230 * d.opacity)],
         stroked: true,
         getLineWidth: 1.5,
         lineWidthUnits: "pixels",
