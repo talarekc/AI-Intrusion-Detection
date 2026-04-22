@@ -458,24 +458,56 @@ LIVE_MAP_HTML = """
     document.getElementById('map-wrap').appendChild(pinOverlay);
 
     let currentDstPositions = [];
-    const arrivedDsts = {}; // persistent — never cleared
+    const arrivedDsts = {};
+    let pinHitTargets = [];
+
+    // Custom tooltip — rendered in HTML, not WebGL
+    const tooltip = document.createElement('div');
+    tooltip.style.cssText = 'position:absolute;display:none;background:rgba(15,20,30,0.9);color:#e2e8f0;font-size:0.75rem;padding:4px 8px;border-radius:4px;border:1px solid #1e293b;pointer-events:none;z-index:20;white-space:nowrap;';
+    document.getElementById('map-wrap').appendChild(tooltip);
 
     function renderPins() {
       const viewports = deckgl.getViewports();
       if (!viewports || !viewports.length) return;
       const viewport = viewports[0];
       pinOverlay.innerHTML = '';
+      pinHitTargets = [];
       currentDstPositions.forEach(({pos, ip}) => {
         const [x, y] = viewport.project(pos);
         if (x < -20 || x > pinOverlay.clientWidth + 20) return;
         if (y < -20 || y > pinOverlay.clientHeight + 20) return;
         const el = document.createElement('span');
         el.textContent = '📍';
-        el.title = ip;
-        el.style.cssText = `position:absolute;left:${x}px;top:${y}px;font-size:22px;transform:translate(-50%,-100%);pointer-events:auto;cursor:default;`;
+        // pointer-events: none so wheel/scroll always reaches deck.gl canvas
+        el.style.cssText = `position:absolute;left:${x}px;top:${y}px;font-size:22px;transform:translate(-50%,-100%);pointer-events:none;`;
         pinOverlay.appendChild(el);
+        pinHitTargets.push({ x, y, ip });
       });
     }
+
+    // Proximity hit-test on mousemove — shows tooltip without blocking scroll
+    document.getElementById('map-wrap').addEventListener('mousemove', e => {
+      const rect = document.getElementById('map-wrap').getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+      let found = null;
+      for (const pin of pinHitTargets) {
+        const dx = mx - pin.x;
+        const dy = my - (pin.y - 14);
+        if (Math.sqrt(dx*dx + dy*dy) < 14) { found = pin; break; }
+      }
+      if (found) {
+        tooltip.style.display = 'block';
+        tooltip.style.left = (found.x + 12) + 'px';
+        tooltip.style.top = (found.y - 36) + 'px';
+        tooltip.textContent = found.ip;
+      } else {
+        tooltip.style.display = 'none';
+      }
+    });
+    document.getElementById('map-wrap').addEventListener('mouseleave', () => {
+      tooltip.style.display = 'none';
+    });
 
     const deckgl = new DeckGL({
       container: "live-map",
