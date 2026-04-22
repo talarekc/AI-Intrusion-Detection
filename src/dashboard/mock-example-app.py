@@ -439,7 +439,14 @@ LIVE_MAP_HTML = """
     }
   };
 
-  Plotly.newPlot("live-map", [], layout, { displayModeBar: false, responsive: true });
+  const mapEl = document.getElementById("live-map");
+  let lastInteraction = 0;
+
+  Plotly.newPlot(mapEl, [], layout, { displayModeBar: false, responsive: true });
+
+  // Pause animation while the user is zooming/panning so it doesn't stutter
+  mapEl.on("plotly_relayouting", () => { lastInteraction = Date.now(); });
+  mapEl.on("plotly_relayout", () => { lastInteraction = Date.now(); });
 
   function spawnPacket() {
     const attack = attacks[Math.floor(Math.random() * attacks.length)];
@@ -462,6 +469,11 @@ LIVE_MAP_HTML = """
   function frame() {
     const now = Date.now();
     livePackets = livePackets.filter(p => now - p.ts < TTL_MS);
+    document.getElementById("count").textContent = livePackets.length;
+
+    // Skip rendering during active zoom/pan to keep interaction smooth.
+    // Packet bookkeeping above still runs, so when we resume the state is current.
+    if (now - lastInteraction < 250) return;
 
     const traces = [];
 
@@ -570,8 +582,7 @@ LIVE_MAP_HTML = """
       });
     }
 
-    Plotly.react("live-map", traces, layout, { displayModeBar: false, responsive: true });
-    document.getElementById("count").textContent = livePackets.length;
+    Plotly.react(mapEl, traces, layout, { displayModeBar: false, responsive: true });
   }
 
   setInterval(frame, FRAME_MS);
