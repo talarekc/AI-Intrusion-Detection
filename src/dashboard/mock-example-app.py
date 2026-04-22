@@ -309,45 +309,89 @@ LIVE_MAP_HTML = """
 <!DOCTYPE html>
 <html>
 <head>
+<meta charset="utf-8">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<script src="https://unpkg.com/deck.gl@8.9.36/dist.min.js"></script>
 <style>
-  body { margin: 0; background: #0a0e17; font-family: 'Inter', sans-serif; color: #e2e8f0; }
-  #status { color: #64748b; font-size: 0.85rem; margin: 0 0 0.5rem 4px; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0a0e17; font-family: 'Inter', sans-serif; color: #e2e8f0; display: flex; flex-direction: column; height: 100vh; }
+  #status { color: #64748b; font-size: 0.82rem; padding: 6px 10px; flex-shrink: 0; }
   .dot {
     display: inline-block; width: 8px; height: 8px; background: #22c55e;
     border-radius: 50%; margin-right: 6px; animation: pulse 2s infinite;
   }
   @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: 0.3 } }
+  #map-wrap { position: relative; flex: 1; }
+  #live-map { width: 100%; height: 100%; }
+  #pin-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 5; overflow: hidden; }
+  .legend { position: absolute; top: 10px; right: 10px; background: rgba(15,20,30,0.75);
+    padding: 10px 14px; border-radius: 6px; font-size: 0.78rem; z-index: 10; border: 1px solid #1e293b; }
+  .legend-item { display: flex; align-items: center; margin-bottom: 5px; }
+  .legend-item:last-child { margin-bottom: 0; }
+  .legend-box { width: 16px; height: 2px; margin-right: 8px; border-radius: 1px; }
 </style>
 </head>
 <body>
   <div id="status"><span class="dot"></span><span id="count">0</span> active packet(s) in flight</div>
-  <div id="live-map" style="width:100%;height:500px;"></div>
+  <div id="map-wrap">
+    <div id="live-map"></div>
+    <div class="legend">
+    <div class="legend-item"><div class="legend-box" style="background:#3b82f6;"></div> Port Scan</div>
+    <div class="legend-item"><div class="legend-box" style="background:#ef4444;"></div> Brute Force</div>
+    <div class="legend-item"><div class="legend-box" style="background:#f97316;"></div> DDoS</div>
+    <div class="legend-item"><div class="legend-box" style="background:#a855f7;"></div> Web Attack</div>
+  </div>
+  </div>
 <script>
   const colorMap = {
-    "Port Scan": "#3b82f6",
-    "Brute Force": "#ef4444",
-    "DDoS": "#f97316",
-    "Web Attack": "#a855f7"
+    "Port Scan": [59, 130, 246],
+    "Brute Force": [239, 68, 68],
+    "DDoS": [249, 115, 22],
+    "Web Attack": [168, 85, 247]
   };
   const attacks = ["Port Scan", "Brute Force", "DDoS", "Web Attack"];
 
-  // Animation timing
-  const DRAW_MS = 900;       // arc extends src -> dst over this duration
-  const IMPACT_MS = 500;     // destination pulse duration after arrival
-  const FADE_MS = 500;       // fade-out after draw completes
+  const DRAW_MS = 900;
+  const IMPACT_MS = 500;
+  const FADE_MS = 500;
   const TTL_MS = DRAW_MS + FADE_MS;
-  const SPAWN_MS = 600;      // new packets spawn every this often
-  const FRAME_MS = 40;       // ~25fps animation tick
-  const PATH_POINTS = 24;    // resolution of great-circle arc
+  const SPAWN_MS = 600;
+  const FRAME_MS = 40;
+  const PATH_POINTS = 24;
+
+  // Quadratic bezier path in lat/lon space — direct flat route src -> dst
+  // with a slight perpendicular curve. Returns array of [lat, lon] pairs.
+  function buildPath(lat1, lon1, lat2, lon2) {
+    const dlon = lon2 - lon1;
+    const dlat = lat2 - lat1;
+    const dist = Math.sqrt(dlat*dlat + dlon*dlon);
+    const len = Math.max(dist, 0.001);
+
+    let perpLat = -dlon / len;
+    let perpLon = dlat / len;
+    if (perpLat < 0) { perpLat = -perpLat; perpLon = -perpLon; }
+    const offset = dist * 0.15;
+
+    const cLat = lat1 + dlat * 0.5 + perpLat * offset;
+    const cLon = lon1 + dlon * 0.5 + perpLon * offset;
+
+    const path = [];
+    for (let i = 0; i <= PATH_POINTS; i++) {
+      const t = i / PATH_POINTS;
+      const u = 1 - t;
+      const lat = u*u*lat1 + 2*u*t*cLat + t*t*lat2;
+      const lon = u*u*lon1 + 2*u*t*cLon + t*t*lon2;
+      path.push([lat, lon]);
+    }
+    return path;
+  }
+
+  function easeOut(t) { return 1 - Math.pow(1 - t, 3); }
 
   let livePackets = [];
 
-  // Curated source cities (lat, lon) — sources snap to one of these so they
-  // always land on a populated city, never in the ocean.
   const SOURCE_CITIES = [
     [40.71, -74.01], [34.05, -118.24], [41.88, -87.63], [29.76, -95.37],
     [25.76, -80.19], [47.61, -122.33], [39.74, -104.99], [43.65, -79.38],
@@ -376,218 +420,190 @@ LIVE_MAP_HTML = """
       const city = SOURCE_CITIES[h % SOURCE_CITIES.length];
       const jitterLat = (((h >> 8) % 100) / 100 - 0.5) * 0.8;
       const jitterLon = (((h >> 16) % 100) / 100 - 0.5) * 0.8;
-      return [city[0] + jitterLat, city[1] + jitterLon];
+      return [city[1] + jitterLon, city[0] + jitterLat];
     }
     return [
-      40.7 + ((h % 1000) / 1000 - 0.5) * 1.5,
-      -74.0 + (((h >> 8) % 1000) / 1000 - 0.5) * 1.5
+      -74.0 + (((h >> 8) % 1000) / 1000 - 0.5) * 1.5,
+      40.7 + ((h % 1000) / 1000 - 0.5) * 1.5
     ];
   }
 
-  // Quadratic bezier path in lat/lon space — direct route from src to dst
-  // with a gentle perpendicular arc. Avoids the polar loops that great-circle
-  // paths can produce on flat projections.
-  function buildPath(lat1, lon1, lat2, lon2) {
-    // Treat map as flat: go directly across the projection from src to dst,
-    // even if that's the longer path on a globe. No dateline wraparound.
-    const dlon = lon2 - lon1;
-    const dlat = lat2 - lat1;
-    const lon2eff = lon2;
+  // Wait for deck.gl to load
+  const waitForDeck = setInterval(() => {
+    if (!window.deck) return;
+    clearInterval(waitForDeck);
 
-    const dist = Math.sqrt(dlat*dlat + dlon*dlon);
-    const len = Math.max(dist, 0.001);
+    const {DeckGL, TileLayer, BitmapLayer, PathLayer, ScatterplotLayer, MapView} = window.deck;
 
-    // Perpendicular offset, always biased "upward" (toward northern hemisphere)
-    // so all arcs curve consistently rather than randomly above/below.
-    let perpLat = -dlon / len;
-    let perpLon = dlat / len;
-    if (perpLat < 0) { perpLat = -perpLat; perpLon = -perpLon; }
-    const offset = dist * 0.15;
-
-    const cLat = lat1 + dlat * 0.5 + perpLat * offset;
-    const cLon = lon1 + dlon * 0.5 + perpLon * offset;
-
-    const path = [];
-    for (let i = 0; i <= PATH_POINTS; i++) {
-      const t = i / PATH_POINTS;
-      const u = 1 - t;
-      const lat = u*u*lat1 + 2*u*t*cLat + t*t*lat2;
-      const lon = u*u*lon1 + 2*u*t*cLon + t*t*lon2eff;
-      path.push([lat, lon]);
-    }
-    return path;
-  }
-
-  // ease-out cubic: starts fast, slows toward destination — feels like a packet
-  function easeOut(t) { return 1 - Math.pow(1 - t, 3); }
-
-  const layout = {
-    paper_bgcolor: "rgba(0,0,0,0)",
-    plot_bgcolor: "rgba(0,0,0,0)",
-    font: { family: "Inter", color: "#94a3b8" },
-    margin: { l: 0, r: 0, t: 10, b: 0 },
-    showlegend: true,
-    legend: { font: { size: 11, color: "#e2e8f0" }, bgcolor: "rgba(0,0,0,0)" },
-    geo: {
-      bgcolor: "rgba(0,0,0,0)",
-      showland: true, landcolor: "#111827",
-      showcountries: true, countrycolor: "#1e293b",
-      showocean: true, oceancolor: "#0a0e17",
-      coastlinecolor: "#1e293b",
-      projection: { type: "natural earth" },
-      showframe: false
-    }
-  };
-
-  const mapEl = document.getElementById("live-map");
-  let lastInteraction = 0;
-
-  Plotly.newPlot(mapEl, [], layout, { displayModeBar: false, responsive: true });
-
-  // Pause animation while the user is zooming/panning so it doesn't stutter
-  mapEl.on("plotly_relayouting", () => { lastInteraction = Date.now(); });
-  mapEl.on("plotly_relayout", () => { lastInteraction = Date.now(); });
-
-  function spawnPacket() {
-    const attack = attacks[Math.floor(Math.random() * attacks.length)];
-    const srcIp = "192.168.1." + (1 + Math.floor(Math.random() * 254));
-    const dstIp = "10.0.0." + (1 + Math.floor(Math.random() * 50));
-    const [srcLat, srcLon] = ipToGeo(srcIp, true);
-    const [dstLat, dstLon] = ipToGeo(dstIp, false);
-    livePackets.push({
-      ts: Date.now(),
-      attack, srcIp, dstIp, srcLat, srcLon, dstLat, dstLon,
-      path: buildPath(srcLat, srcLon, dstLat, dstLon)
-    });
-  }
-
-  function spawnTick() {
-    const n = 1 + Math.floor(Math.random() * 2);
-    for (let i = 0; i < n; i++) spawnPacket();
-  }
-
-  function frame() {
-    const now = Date.now();
-    livePackets = livePackets.filter(p => now - p.ts < TTL_MS);
-    document.getElementById("count").textContent = livePackets.length;
-
-    // Skip rendering during active zoom/pan to keep interaction smooth.
-    // Packet bookkeeping above still runs, so when we resume the state is current.
-    if (now - lastInteraction < 250) return;
-
-    const traces = [];
-
-    // Static legend stubs: one per attack type, fixed order, no data.
-    // These provide a stable legend regardless of which packets are in flight.
-    attacks.forEach(a => {
-      traces.push({
-        type: "scattergeo",
-        lat: [null], lon: [null],
-        mode: "lines",
-        line: { width: 2, color: colorMap[a] },
-        name: a,
-        legendgroup: a,
-        showlegend: true,
-        hoverinfo: "skip"
-      });
-    });
-
-    const srcLats = [], srcLons = [], srcText = [], srcOpac = [];
-    const dstLats = [], dstLons = [], dstSizes = [], dstText = [];
-    const headLats = [], headLons = [], headColors = [], headSizes = [];
-
-    livePackets.forEach(p => {
-      const age = now - p.ts;
-      const rawProgress = Math.min(1.0, age / DRAW_MS);
-      const progress = easeOut(rawProgress);
-      const drawing = age < DRAW_MS;
-
-      // Opacity: full while drawing, then linear fade after arrival
-      const opacity = drawing ? 1.0 : Math.max(0, 1 - (age - DRAW_MS) / FADE_MS);
-      if (opacity <= 0) return;
-
-      const color = colorMap[p.attack] || "#3b82f6";
-
-      // Build current arc segment from src to current head position
-      const N = p.path.length - 1;
-      const lastIdx = Math.max(1, Math.min(N, Math.ceil(progress * N)));
-      const lats = [], lons = [];
-      for (let i = 0; i <= lastIdx; i++) {
-        lats.push(p.path[i][0]);
-        lons.push(p.path[i][1]);
-      }
-
-      traces.push({
-        type: "scattergeo",
-        lat: lats, lon: lons,
-        mode: "lines",
-        line: { width: 2, color: color },
-        opacity: opacity,
-        legendgroup: p.attack,
-        showlegend: false,
-        hoverinfo: "skip"
-      });
-
-      // Source marker
-      srcLats.push(p.srcLat); srcLons.push(p.srcLon);
-      srcText.push(p.srcIp + " &rarr; " + p.dstIp + "<br>" + p.attack);
-      srcOpac.push(opacity * 0.85);
-
-      if (drawing) {
-        // Bright head marker leading the line — the "tracer"
-        const head = p.path[lastIdx];
-        headLats.push(head[0]);
-        headLons.push(head[1]);
-        headColors.push(color);
-        headSizes.push(9);
-      } else {
-        // Destination pulse — grows briefly on impact, then settles
-        const impactAge = age - DRAW_MS;
-        const pulseT = Math.min(1, impactAge / IMPACT_MS);
-        const pulseSize = 9 + (1 - pulseT) * 10;
-        dstLats.push(p.dstLat); dstLons.push(p.dstLon);
-        dstSizes.push(pulseSize);
-        dstText.push(p.dstIp);
+    // Free CartoDB dark basemap tiles — no token required
+    const basemap = new TileLayer({
+      id: "basemap",
+      data: "https://cartodb-basemaps-a.global.ssl.fastly.net/dark_all/{z}/{x}/{y}.png",
+      minZoom: 0,
+      maxZoom: 19,
+      tileSize: 256,
+      renderSubLayers: props => {
+        const {boundingBox} = props.tile;
+        return new BitmapLayer(props, {
+          data: null,
+          image: props.data,
+          bounds: [boundingBox[0][0], boundingBox[0][1], boundingBox[1][0], boundingBox[1][1]]
+        });
       }
     });
 
-    if (srcLats.length) {
-      traces.push({
-        type: "scattergeo",
-        lat: srcLats, lon: srcLons, mode: "markers",
-        marker: { size: 6, color: "#ef4444", opacity: srcOpac, line: { width: 0 } },
-        name: "Source", text: srcText, hoverinfo: "text", showlegend: false
-      });
-    }
-    if (headLats.length) {
-      traces.push({
-        type: "scattergeo",
-        lat: headLats, lon: headLons, mode: "markers",
-        marker: {
-          size: headSizes, color: headColors,
-          line: { color: "#ffffff", width: 1.5 }
-        },
-        hoverinfo: "skip", showlegend: false
-      });
-    }
-    if (dstLats.length) {
-      traces.push({
-        type: "scattergeo",
-        lat: dstLats, lon: dstLons, mode: "markers",
-        marker: {
-          size: dstSizes, color: "#22c55e", symbol: "diamond",
-          line: { color: "#bbf7d0", width: 1 }
-        },
-        name: "Destination", text: dstText, hoverinfo: "text", showlegend: false
+    // HTML overlay for emoji pins — renders on top of WebGL canvas
+    const pinOverlay = document.createElement('div');
+    pinOverlay.id = 'pin-overlay';
+    document.getElementById('map-wrap').appendChild(pinOverlay);
+
+    let currentDstPositions = [];
+    const arrivedDsts = {}; // persistent — never cleared
+
+    function renderPins() {
+      const viewports = deckgl.getViewports();
+      if (!viewports || !viewports.length) return;
+      const viewport = viewports[0];
+      pinOverlay.innerHTML = '';
+      currentDstPositions.forEach(({pos, ip}) => {
+        const [x, y] = viewport.project(pos);
+        if (x < -20 || x > pinOverlay.clientWidth + 20) return;
+        if (y < -20 || y > pinOverlay.clientHeight + 20) return;
+        const el = document.createElement('span');
+        el.textContent = '📍';
+        el.title = ip;
+        el.style.cssText = `position:absolute;left:${x}px;top:${y}px;font-size:22px;transform:translate(-50%,-100%);pointer-events:auto;cursor:default;`;
+        pinOverlay.appendChild(el);
       });
     }
 
-    Plotly.react(mapEl, traces, layout, { displayModeBar: false, responsive: true });
-  }
+    const deckgl = new DeckGL({
+      container: "live-map",
+      views: new MapView({ repeat: true }),
+      initialViewState: {
+        longitude: -40,
+        latitude: 30,
+        zoom: 2,
+        pitch: 0,
+        bearing: 0
+      },
+      controller: { minZoom: 1.0 },
+      layers: [basemap],
+      onViewStateChange: () => renderPins()
+    });
 
-  setInterval(frame, FRAME_MS);
-  setInterval(spawnTick, SPAWN_MS);
-  spawnTick();
+    function spawnPacket() {
+      const attack = attacks[Math.floor(Math.random() * attacks.length)];
+      const srcIp = "192.168.1." + (1 + Math.floor(Math.random() * 254));
+      const dstIp = "10.0.0." + (1 + Math.floor(Math.random() * 50));
+      const [srcLon, srcLat] = ipToGeo(srcIp, true);
+      const [dstLon, dstLat] = ipToGeo(dstIp, false);
+      livePackets.push({
+        ts: Date.now(),
+        attack, srcIp, dstIp,
+        src: [srcLon, srcLat],
+        dst: [dstLon, dstLat],
+        path: buildPath(srcLat, srcLon, dstLat, dstLon)
+      });
+    }
+
+    function spawnTick() {
+      const n = 1 + Math.floor(Math.random() * 2);
+      for (let i = 0; i < n; i++) spawnPacket();
+    }
+
+    function updateMap() {
+      const now = Date.now();
+      livePackets = livePackets.filter(p => now - p.ts < TTL_MS);
+      document.getElementById("count").textContent = livePackets.length;
+
+      const pathsByAttack = {};
+      attacks.forEach(a => { pathsByAttack[a] = []; });
+      const sources = [];
+      const heads = [];
+
+      livePackets.forEach(p => {
+        const age = now - p.ts;
+        const drawing = age < DRAW_MS;
+        const rawProgress = Math.min(1, age / DRAW_MS);
+        const progress = easeOut(rawProgress);
+        const opacity = drawing ? 1.0 : Math.max(0, 1 - (age - DRAW_MS) / FADE_MS);
+        if (opacity <= 0) return;
+
+        // Slice the bezier path up to current progress; convert [lat,lon] -> [lon,lat] for deck
+        const N = p.path.length - 1;
+        const lastIdx = Math.max(1, Math.min(N, Math.ceil(progress * N)));
+        const partial = [];
+        for (let i = 0; i <= lastIdx; i++) {
+          partial.push([p.path[i][1], p.path[i][0]]);
+        }
+
+        pathsByAttack[p.attack].push({ path: partial, opacity });
+
+        sources.push({ position: p.src, opacity });
+
+        if (drawing) {
+          const head = p.path[lastIdx];
+          heads.push({ position: [head[1], head[0]], color: colorMap[p.attack] });
+        }
+      });
+
+      const pathLayers = attacks
+        .filter(a => pathsByAttack[a].length > 0)
+        .map(a => new PathLayer({
+          id: `path-${a}`,
+          data: pathsByAttack[a],
+          getPath: d => d.path,
+          getColor: d => [...colorMap[a], Math.round(255 * d.opacity)],
+          getWidth: 2,
+          widthUnits: "pixels",
+          jointRounded: true,
+          capRounded: true,
+          wrapLongitude: false
+        }));
+
+      const sourceLayer = new ScatterplotLayer({
+        id: "sources",
+        data: sources,
+        getPosition: d => d.position,
+        getFillColor: d => [239, 68, 68, Math.round(220 * d.opacity)],
+        getRadius: 4,
+        radiusUnits: "pixels"
+      });
+
+      const headLayer = new ScatterplotLayer({
+        id: "heads",
+        data: heads,
+        getPosition: d => d.position,
+        getFillColor: d => [...d.color, 255],
+        getLineColor: [255, 255, 255, 230],
+        stroked: true,
+        getLineWidth: 1.5,
+        lineWidthUnits: "pixels",
+        getRadius: 5,
+        radiusUnits: "pixels"
+      });
+
+      // Add newly arrived destinations to the persistent map
+      livePackets.forEach(p => {
+        const age = now - p.ts;
+        const progress = easeOut(Math.min(1, age / DRAW_MS));
+        if (progress < 0.99) return;
+        const key = p.dst.join(",");
+        if (!arrivedDsts[key]) arrivedDsts[key] = { pos: p.dst, ip: p.dstIp };
+      });
+      currentDstPositions = Object.values(arrivedDsts);
+      renderPins();
+
+      deckgl.setProps({
+        layers: [basemap, ...pathLayers, sourceLayer, headLayer]
+      });
+    }
+
+    setInterval(updateMap, FRAME_MS);
+    setInterval(spawnTick, SPAWN_MS);
+    spawnTick();
+  }, 100);
 </script>
 </body>
 </html>
