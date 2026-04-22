@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -286,9 +287,6 @@ with col4:
 
 st.markdown("")
 
-# Charts
-left, right = st.columns(2)
-
 chart_layout = dict(
     paper_bgcolor="rgba(0,0,0,0)",
     plot_bgcolor="rgba(0,0,0,0)",
@@ -303,6 +301,288 @@ color_map = {
     "DDoS": "#f97316",
     "Web Attack": "#a855f7"
 }
+
+# Live traffic map: client-side JS animation, no Streamlit reruns
+st.markdown('<div class="section-title">Live Traffic Map</div>', unsafe_allow_html=True)
+
+LIVE_MAP_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<style>
+  body { margin: 0; background: #0a0e17; font-family: 'Inter', sans-serif; color: #e2e8f0; }
+  #status { color: #64748b; font-size: 0.85rem; margin: 0 0 0.5rem 4px; }
+  .dot {
+    display: inline-block; width: 8px; height: 8px; background: #22c55e;
+    border-radius: 50%; margin-right: 6px; animation: pulse 2s infinite;
+  }
+  @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: 0.3 } }
+</style>
+</head>
+<body>
+  <div id="status"><span class="dot"></span><span id="count">0</span> active packet(s) in flight</div>
+  <div id="live-map" style="width:100%;height:500px;"></div>
+<script>
+  const colorMap = {
+    "Port Scan": "#3b82f6",
+    "Brute Force": "#ef4444",
+    "DDoS": "#f97316",
+    "Web Attack": "#a855f7"
+  };
+  const attacks = ["Port Scan", "Brute Force", "DDoS", "Web Attack"];
+
+  // Animation timing
+  const DRAW_MS = 900;       // arc extends src -> dst over this duration
+  const IMPACT_MS = 500;     // destination pulse duration after arrival
+  const FADE_MS = 500;       // fade-out after draw completes
+  const TTL_MS = DRAW_MS + FADE_MS;
+  const SPAWN_MS = 600;      // new packets spawn every this often
+  const FRAME_MS = 40;       // ~25fps animation tick
+  const PATH_POINTS = 24;    // resolution of great-circle arc
+
+  let livePackets = [];
+
+  // Curated source cities (lat, lon) — sources snap to one of these so they
+  // always land on a populated city, never in the ocean.
+  const SOURCE_CITIES = [
+    [40.71, -74.01], [34.05, -118.24], [41.88, -87.63], [29.76, -95.37],
+    [25.76, -80.19], [47.61, -122.33], [39.74, -104.99], [43.65, -79.38],
+    [49.28, -123.12], [19.43, -99.13],
+    [-23.55, -46.63], [-34.60, -58.38], [-12.05, -77.04], [4.71, -74.07],
+    [-33.45, -70.67], [-22.91, -43.17],
+    [51.51, -0.13], [48.86, 2.35], [52.52, 13.40], [40.42, -3.70],
+    [41.90, 12.50], [55.76, 37.62], [59.33, 18.07], [52.37, 4.90],
+    [52.23, 21.01], [41.01, 28.98], [50.45, 30.52], [53.35, -6.26],
+    [30.04, 31.24], [6.52, 3.38], [-1.29, 36.82], [-26.20, 28.04],
+    [33.57, -7.59], [9.03, 38.74],
+    [35.68, 139.69], [39.90, 116.41], [31.23, 121.47], [37.57, 126.98],
+    [19.08, 72.88], [28.61, 77.21], [13.76, 100.50], [1.35, 103.82],
+    [-6.21, 106.85], [14.60, 120.98], [21.03, 105.85], [35.69, 51.39],
+    [24.86, 67.01], [24.71, 46.68], [25.20, 55.27], [22.32, 114.17],
+    [-33.87, 151.21], [-37.81, 144.96], [-36.85, 174.76]
+  ];
+
+  function ipToGeo(ip, isSource) {
+    let h = 0;
+    for (let i = 0; i < ip.length; i++) {
+      h = ((h << 5) - h + ip.charCodeAt(i)) | 0;
+    }
+    h = Math.abs(h);
+    if (isSource) {
+      const city = SOURCE_CITIES[h % SOURCE_CITIES.length];
+      const jitterLat = (((h >> 8) % 100) / 100 - 0.5) * 0.8;
+      const jitterLon = (((h >> 16) % 100) / 100 - 0.5) * 0.8;
+      return [city[0] + jitterLat, city[1] + jitterLon];
+    }
+    return [
+      40.7 + ((h % 1000) / 1000 - 0.5) * 1.5,
+      -74.0 + (((h >> 8) % 1000) / 1000 - 0.5) * 1.5
+    ];
+  }
+
+  // Quadratic bezier path in lat/lon space — direct route from src to dst
+  // with a gentle perpendicular arc. Avoids the polar loops that great-circle
+  // paths can produce on flat projections.
+  function buildPath(lat1, lon1, lat2, lon2) {
+    // Treat map as flat: go directly across the projection from src to dst,
+    // even if that's the longer path on a globe. No dateline wraparound.
+    const dlon = lon2 - lon1;
+    const dlat = lat2 - lat1;
+    const lon2eff = lon2;
+
+    const dist = Math.sqrt(dlat*dlat + dlon*dlon);
+    const len = Math.max(dist, 0.001);
+
+    // Perpendicular offset, always biased "upward" (toward northern hemisphere)
+    // so all arcs curve consistently rather than randomly above/below.
+    let perpLat = -dlon / len;
+    let perpLon = dlat / len;
+    if (perpLat < 0) { perpLat = -perpLat; perpLon = -perpLon; }
+    const offset = dist * 0.15;
+
+    const cLat = lat1 + dlat * 0.5 + perpLat * offset;
+    const cLon = lon1 + dlon * 0.5 + perpLon * offset;
+
+    const path = [];
+    for (let i = 0; i <= PATH_POINTS; i++) {
+      const t = i / PATH_POINTS;
+      const u = 1 - t;
+      const lat = u*u*lat1 + 2*u*t*cLat + t*t*lat2;
+      const lon = u*u*lon1 + 2*u*t*cLon + t*t*lon2eff;
+      path.push([lat, lon]);
+    }
+    return path;
+  }
+
+  // ease-out cubic: starts fast, slows toward destination — feels like a packet
+  function easeOut(t) { return 1 - Math.pow(1 - t, 3); }
+
+  const layout = {
+    paper_bgcolor: "rgba(0,0,0,0)",
+    plot_bgcolor: "rgba(0,0,0,0)",
+    font: { family: "Inter", color: "#94a3b8" },
+    margin: { l: 0, r: 0, t: 10, b: 0 },
+    showlegend: true,
+    legend: { font: { size: 11, color: "#e2e8f0" }, bgcolor: "rgba(0,0,0,0)" },
+    geo: {
+      bgcolor: "rgba(0,0,0,0)",
+      showland: true, landcolor: "#111827",
+      showcountries: true, countrycolor: "#1e293b",
+      showocean: true, oceancolor: "#0a0e17",
+      coastlinecolor: "#1e293b",
+      projection: { type: "natural earth" },
+      showframe: false
+    }
+  };
+
+  Plotly.newPlot("live-map", [], layout, { displayModeBar: false, responsive: true });
+
+  function spawnPacket() {
+    const attack = attacks[Math.floor(Math.random() * attacks.length)];
+    const srcIp = "192.168.1." + (1 + Math.floor(Math.random() * 254));
+    const dstIp = "10.0.0." + (1 + Math.floor(Math.random() * 50));
+    const [srcLat, srcLon] = ipToGeo(srcIp, true);
+    const [dstLat, dstLon] = ipToGeo(dstIp, false);
+    livePackets.push({
+      ts: Date.now(),
+      attack, srcIp, dstIp, srcLat, srcLon, dstLat, dstLon,
+      path: buildPath(srcLat, srcLon, dstLat, dstLon)
+    });
+  }
+
+  function spawnTick() {
+    const n = 1 + Math.floor(Math.random() * 2);
+    for (let i = 0; i < n; i++) spawnPacket();
+  }
+
+  function frame() {
+    const now = Date.now();
+    livePackets = livePackets.filter(p => now - p.ts < TTL_MS);
+
+    const traces = [];
+
+    // Static legend stubs: one per attack type, fixed order, no data.
+    // These provide a stable legend regardless of which packets are in flight.
+    attacks.forEach(a => {
+      traces.push({
+        type: "scattergeo",
+        lat: [null], lon: [null],
+        mode: "lines",
+        line: { width: 2, color: colorMap[a] },
+        name: a,
+        legendgroup: a,
+        showlegend: true,
+        hoverinfo: "skip"
+      });
+    });
+
+    const srcLats = [], srcLons = [], srcText = [], srcOpac = [];
+    const dstLats = [], dstLons = [], dstSizes = [], dstText = [];
+    const headLats = [], headLons = [], headColors = [], headSizes = [];
+
+    livePackets.forEach(p => {
+      const age = now - p.ts;
+      const rawProgress = Math.min(1.0, age / DRAW_MS);
+      const progress = easeOut(rawProgress);
+      const drawing = age < DRAW_MS;
+
+      // Opacity: full while drawing, then linear fade after arrival
+      const opacity = drawing ? 1.0 : Math.max(0, 1 - (age - DRAW_MS) / FADE_MS);
+      if (opacity <= 0) return;
+
+      const color = colorMap[p.attack] || "#3b82f6";
+
+      // Build current arc segment from src to current head position
+      const N = p.path.length - 1;
+      const lastIdx = Math.max(1, Math.min(N, Math.ceil(progress * N)));
+      const lats = [], lons = [];
+      for (let i = 0; i <= lastIdx; i++) {
+        lats.push(p.path[i][0]);
+        lons.push(p.path[i][1]);
+      }
+
+      traces.push({
+        type: "scattergeo",
+        lat: lats, lon: lons,
+        mode: "lines",
+        line: { width: 2, color: color },
+        opacity: opacity,
+        legendgroup: p.attack,
+        showlegend: false,
+        hoverinfo: "skip"
+      });
+
+      // Source marker
+      srcLats.push(p.srcLat); srcLons.push(p.srcLon);
+      srcText.push(p.srcIp + " &rarr; " + p.dstIp + "<br>" + p.attack);
+      srcOpac.push(opacity * 0.85);
+
+      if (drawing) {
+        // Bright head marker leading the line — the "tracer"
+        const head = p.path[lastIdx];
+        headLats.push(head[0]);
+        headLons.push(head[1]);
+        headColors.push(color);
+        headSizes.push(9);
+      } else {
+        // Destination pulse — grows briefly on impact, then settles
+        const impactAge = age - DRAW_MS;
+        const pulseT = Math.min(1, impactAge / IMPACT_MS);
+        const pulseSize = 9 + (1 - pulseT) * 10;
+        dstLats.push(p.dstLat); dstLons.push(p.dstLon);
+        dstSizes.push(pulseSize);
+        dstText.push(p.dstIp);
+      }
+    });
+
+    if (srcLats.length) {
+      traces.push({
+        type: "scattergeo",
+        lat: srcLats, lon: srcLons, mode: "markers",
+        marker: { size: 6, color: "#ef4444", opacity: srcOpac, line: { width: 0 } },
+        name: "Source", text: srcText, hoverinfo: "text", showlegend: false
+      });
+    }
+    if (headLats.length) {
+      traces.push({
+        type: "scattergeo",
+        lat: headLats, lon: headLons, mode: "markers",
+        marker: {
+          size: headSizes, color: headColors,
+          line: { color: "#ffffff", width: 1.5 }
+        },
+        hoverinfo: "skip", showlegend: false
+      });
+    }
+    if (dstLats.length) {
+      traces.push({
+        type: "scattergeo",
+        lat: dstLats, lon: dstLons, mode: "markers",
+        marker: {
+          size: dstSizes, color: "#22c55e", symbol: "diamond",
+          line: { color: "#bbf7d0", width: 1 }
+        },
+        name: "Destination", text: dstText, hoverinfo: "text", showlegend: false
+      });
+    }
+
+    Plotly.react("live-map", traces, layout, { displayModeBar: false, responsive: true });
+    document.getElementById("count").textContent = livePackets.length;
+  }
+
+  setInterval(frame, FRAME_MS);
+  setInterval(spawnTick, SPAWN_MS);
+  spawnTick();
+</script>
+</body>
+</html>
+"""
+
+components.html(LIVE_MAP_HTML, height=560, scrolling=False)
+
+# Charts
+left, right = st.columns(2)
 
 with left:
     st.markdown('<div class="section-title">Threats by Type</div>', unsafe_allow_html=True)
