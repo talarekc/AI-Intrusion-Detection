@@ -519,7 +519,7 @@ LIVE_MAP_HTML = """
         pitch: 0,
         bearing: 0
       },
-      controller: { minZoom: 1.0 },
+      controller: { minZoom: 1.1 },
       layers: [basemap],
       onViewStateChange: () => renderPins()
     });
