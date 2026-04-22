@@ -199,6 +199,13 @@ st.markdown("""
     details summary span {
         color: #e2e8f0 !important;
     }
+
+    /* Cap layout width so it doesn't stretch on 2K+ screens */
+    .block-container {
+        max-width: 1400px !important;
+        margin-left: auto !important;
+        margin-right: auto !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -302,7 +309,7 @@ color_map = {
     "Web Attack": "#a855f7"
 }
 
-# Live traffic map: client-side JS animation, no Streamlit reruns
+# Live traffic map + real-time alert log: all client-side JS, no Streamlit reruns
 st.markdown('<div class="section-title">Live Traffic Map</div>', unsafe_allow_html=True)
 
 LIVE_MAP_HTML = """
@@ -320,10 +327,10 @@ LIVE_MAP_HTML = """
   #status { color: #64748b; font-size: 0.82rem; padding: 6px 10px; flex-shrink: 0; }
   .dot {
     display: inline-block; width: 8px; height: 8px; background: #22c55e;
-    border-radius: 50%; margin-right: 6px; animation: pulse 2s infinite;
+    border-radius: 50%; margin-right: 6px; animation: blink 2s infinite;
   }
-  @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: 0.3 } }
-  #map-wrap { position: relative; flex: 1; }
+  @keyframes blink { 0%,100% { opacity: 1 } 50% { opacity: 0.3 } }
+  #map-wrap { position: relative; flex: 1; min-height: 0; }
   #live-map { width: 100%; height: 100%; }
   #pin-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 5; overflow: hidden; }
   .legend { position: absolute; top: 10px; right: 10px; background: rgba(15,20,30,0.75);
@@ -331,6 +338,56 @@ LIVE_MAP_HTML = """
   .legend-item { display: flex; align-items: center; margin-bottom: 5px; }
   .legend-item:last-child { margin-bottom: 0; }
   .legend-box { width: 16px; height: 2px; margin-right: 8px; border-radius: 1px; }
+
+  /* Alert log panel */
+  #alert-panel {
+    flex-shrink: 0;
+    height: 215px;
+    background: #0d1117;
+    border-top: 1px solid #1e293b;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  #alert-panel-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 5px 12px;
+    border-bottom: 1px solid #1e293b;
+    flex-shrink: 0;
+  }
+  #alert-panel-header .title {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #94a3b8;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  #alert-count { font-size: 0.72rem; color: #475569; }
+  #alert-scroll { overflow-y: auto; overflow-x: auto; flex: 1; }
+  #alert-table { width: 100%; border-collapse: collapse; font-size: 0.74rem; }
+  #alert-table thead th {
+    position: sticky; top: 0;
+    background: #111827;
+    color: #475569;
+    text-transform: uppercase;
+    font-size: 0.63rem;
+    letter-spacing: 0.05em;
+    padding: 3px 10px;
+    text-align: left;
+    border-bottom: 1px solid #1e293b;
+    white-space: nowrap;
+  }
+  #alert-table td {
+    padding: 3px 10px;
+    color: #cbd5e1;
+    border-bottom: 1px solid rgba(30,41,59,0.4);
+    white-space: nowrap;
+  }
+  #alert-table tr:hover td { background: rgba(30,41,59,0.4); }
+  @keyframes rowIn { from { background: rgba(59,130,246,0.12); } to { background: transparent; } }
+  .row-new { animation: rowIn 1.2s ease forwards; }
 </style>
 </head>
 <body>
@@ -338,11 +395,33 @@ LIVE_MAP_HTML = """
   <div id="map-wrap">
     <div id="live-map"></div>
     <div class="legend">
-    <div class="legend-item"><div class="legend-box" style="background:#3b82f6;"></div> Port Scan</div>
-    <div class="legend-item"><div class="legend-box" style="background:#ef4444;"></div> Brute Force</div>
-    <div class="legend-item"><div class="legend-box" style="background:#f97316;"></div> DDoS</div>
-    <div class="legend-item"><div class="legend-box" style="background:#a855f7;"></div> Web Attack</div>
+      <div class="legend-item"><div class="legend-box" style="background:#3b82f6;"></div> Port Scan</div>
+      <div class="legend-item"><div class="legend-box" style="background:#ef4444;"></div> Brute Force</div>
+      <div class="legend-item"><div class="legend-box" style="background:#f97316;"></div> DDoS</div>
+      <div class="legend-item"><div class="legend-box" style="background:#a855f7;"></div> Web Attack</div>
+    </div>
   </div>
+  <div id="alert-panel">
+    <div id="alert-panel-header">
+      <span class="title">Alert Log</span>
+      <span id="alert-count">0 alerts</span>
+    </div>
+    <div id="alert-scroll">
+      <table id="alert-table">
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Origin</th>
+            <th>Source IP</th>
+            <th>Attack</th>
+            <th>Target IP</th>
+          </tr>
+        </thead>
+        <tbody id="alert-tbody">
+          <tr><td colspan="5" style="color:#475569;text-align:center;padding:16px;">Waiting for traffic…</td></tr>
+        </tbody>
+      </table>
+    </div>
   </div>
 <script>
   const colorMap = {
@@ -351,82 +430,127 @@ LIVE_MAP_HTML = """
     "DDoS": [249, 115, 22],
     "Web Attack": [168, 85, 247]
   };
+  const badgeStyle = {
+    "Port Scan":   {bg:"#1e3a5f", text:"#93c5fd"},
+    "Brute Force": {bg:"#450a0a", text:"#fca5a5"},
+    "DDoS":        {bg:"#431407", text:"#fdba74"},
+    "Web Attack":  {bg:"#3b0764", text:"#d8b4fe"}
+  };
   const attacks = ["Port Scan", "Brute Force", "DDoS", "Web Attack"];
 
   const DRAW_MS = 900;
-  const IMPACT_MS = 500;
   const FADE_MS = 500;
   const TTL_MS = DRAW_MS + FADE_MS;
   const SPAWN_MS = 600;
-  const FRAME_MS = 40;
-  const PATH_POINTS = 24;
+  const PATH_POINTS = 360;
+  const HEAD_FADE_MS = 250;
 
-  // Quadratic bezier path in lat/lon space — direct flat route src -> dst
-  // with a slight perpendicular curve. Returns array of [lat, lon] pairs.
+  const SOURCE_CITIES = [
+    {name:"New York",lat:40.71,lon:-74.01},{name:"Los Angeles",lat:34.05,lon:-118.24},
+    {name:"Chicago",lat:41.88,lon:-87.63},{name:"Houston",lat:29.76,lon:-95.37},
+    {name:"Miami",lat:25.76,lon:-80.19},{name:"Seattle",lat:47.61,lon:-122.33},
+    {name:"Denver",lat:39.74,lon:-104.99},{name:"Toronto",lat:43.65,lon:-79.38},
+    {name:"Vancouver",lat:49.28,lon:-123.12},{name:"Mexico City",lat:19.43,lon:-99.13},
+    {name:"São Paulo",lat:-23.55,lon:-46.63},{name:"Buenos Aires",lat:-34.60,lon:-58.38},
+    {name:"Lima",lat:-12.05,lon:-77.04},{name:"Bogotá",lat:4.71,lon:-74.07},
+    {name:"Santiago",lat:-33.45,lon:-70.67},{name:"Rio de Janeiro",lat:-22.91,lon:-43.17},
+    {name:"London",lat:51.51,lon:-0.13},{name:"Paris",lat:48.86,lon:2.35},
+    {name:"Berlin",lat:52.52,lon:13.40},{name:"Madrid",lat:40.42,lon:-3.70},
+    {name:"Rome",lat:41.90,lon:12.50},{name:"Moscow",lat:55.76,lon:37.62},
+    {name:"Stockholm",lat:59.33,lon:18.07},{name:"Amsterdam",lat:52.37,lon:4.90},
+    {name:"Warsaw",lat:52.23,lon:21.01},{name:"Istanbul",lat:41.01,lon:28.98},
+    {name:"Kyiv",lat:50.45,lon:30.52},{name:"Dublin",lat:53.35,lon:-6.26},
+    {name:"Cairo",lat:30.04,lon:31.24},{name:"Lagos",lat:6.52,lon:3.38},
+    {name:"Nairobi",lat:-1.29,lon:36.82},{name:"Johannesburg",lat:-26.20,lon:28.04},
+    {name:"Casablanca",lat:33.57,lon:-7.59},{name:"Addis Ababa",lat:9.03,lon:38.74},
+    {name:"Tokyo",lat:35.68,lon:139.69},{name:"Beijing",lat:39.90,lon:116.41},
+    {name:"Shanghai",lat:31.23,lon:121.47},{name:"Seoul",lat:37.57,lon:126.98},
+    {name:"Mumbai",lat:19.08,lon:72.88},{name:"New Delhi",lat:28.61,lon:77.21},
+    {name:"Bangkok",lat:13.76,lon:100.50},{name:"Singapore",lat:1.35,lon:103.82},
+    {name:"Jakarta",lat:-6.21,lon:106.85},{name:"Manila",lat:14.60,lon:120.98},
+    {name:"Hanoi",lat:21.03,lon:105.85},{name:"Tehran",lat:35.69,lon:51.39},
+    {name:"Karachi",lat:24.86,lon:67.01},{name:"Riyadh",lat:24.71,lon:46.68},
+    {name:"Dubai",lat:25.20,lon:55.27},{name:"Hong Kong",lat:22.32,lon:114.17},
+    {name:"Sydney",lat:-33.87,lon:151.21},{name:"Melbourne",lat:-37.81,lon:144.96},
+    {name:"Auckland",lat:-36.85,lon:174.76}
+  ];
+
+  function ipToGeo(ip, isSource) {
+    let h = 0;
+    for (let i = 0; i < ip.length; i++) h = ((h << 5) - h + ip.charCodeAt(i)) | 0;
+    h = Math.abs(h);
+    if (isSource) {
+      const city = SOURCE_CITIES[h % SOURCE_CITIES.length];
+      return [city.lon + (((h >> 16) % 100) / 100 - 0.5) * 0.8,
+              city.lat + (((h >> 8)  % 100) / 100 - 0.5) * 0.8];
+    }
+    return [-74.0 + (((h >> 8) % 1000) / 1000 - 0.5) * 1.5,
+             40.7 + ((h % 1000) / 1000 - 0.5) * 1.5];
+  }
+
+  function ipToCity(ip) {
+    let h = 0;
+    for (let i = 0; i < ip.length; i++) h = ((h << 5) - h + ip.charCodeAt(i)) | 0;
+    return SOURCE_CITIES[Math.abs(h) % SOURCE_CITIES.length].name;
+  }
+
+  // Alert log state
+  const alertLog = [];
+  const MAX_LOG = 50;
+  let logDirty = false;
+
+  function addToLog(p) {
+    const t = new Date();
+    const timeStr = t.toLocaleTimeString('en-US', {hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit'});
+    alertLog.unshift({ time: timeStr, city: p.srcCity, srcIp: p.srcIp, attack: p.attack, dstIp: p.dstIp });
+    if (alertLog.length > MAX_LOG) alertLog.pop();
+    logDirty = true;
+  }
+
+  function renderLog() {
+    const tbody = document.getElementById('alert-tbody');
+    const n = alertLog.length;
+    document.getElementById('alert-count').textContent = n + ' alert' + (n !== 1 ? 's' : '');
+    if (n === 0) {
+      tbody.innerHTML = '<tr><td colspan="5" style="color:#475569;text-align:center;padding:16px;">Waiting for traffic…</td></tr>';
+      return;
+    }
+    tbody.innerHTML = alertLog.map((e, i) => {
+      const b = badgeStyle[e.attack];
+      return `<tr${i === 0 ? ' class="row-new"' : ''}>
+        <td style="color:#64748b;">${e.time}</td>
+        <td>${e.city}</td>
+        <td style="color:#94a3b8;font-family:monospace;">${e.srcIp}</td>
+        <td><span style="background:${b.bg};color:${b.text};padding:1px 7px;border-radius:10px;font-size:0.68rem;font-weight:600;">${e.attack}</span></td>
+        <td style="color:#94a3b8;font-family:monospace;">${e.dstIp}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  // Quadratic bezier path in lat/lon space
   function buildPath(lat1, lon1, lat2, lon2) {
     const dlon = lon2 - lon1;
     const dlat = lat2 - lat1;
     const dist = Math.sqrt(dlat*dlat + dlon*dlon);
     const len = Math.max(dist, 0.001);
-
     let perpLat = -dlon / len;
     let perpLon = dlat / len;
     if (perpLat < 0) { perpLat = -perpLat; perpLon = -perpLon; }
-    const offset = dist * 0.15;
-
-    const cLat = lat1 + dlat * 0.5 + perpLat * offset;
+    const offset = Math.min(dist * 0.15, 18);
+    const cLat = Math.max(-60, Math.min(60, lat1 + dlat * 0.5 + perpLat * offset));
     const cLon = lon1 + dlon * 0.5 + perpLon * offset;
-
     const path = [];
     for (let i = 0; i <= PATH_POINTS; i++) {
       const t = i / PATH_POINTS;
       const u = 1 - t;
-      const lat = u*u*lat1 + 2*u*t*cLat + t*t*lat2;
-      const lon = u*u*lon1 + 2*u*t*cLon + t*t*lon2;
-      path.push([lat, lon]);
+      path.push([u*u*lat1 + 2*u*t*cLat + t*t*lat2, u*u*lon1 + 2*u*t*cLon + t*t*lon2]);
     }
     return path;
   }
 
-  function easeOut(t) { return 1 - Math.pow(1 - t, 3); }
+  function easeOut(t) { return t; }
 
   let livePackets = [];
-
-  const SOURCE_CITIES = [
-    [40.71, -74.01], [34.05, -118.24], [41.88, -87.63], [29.76, -95.37],
-    [25.76, -80.19], [47.61, -122.33], [39.74, -104.99], [43.65, -79.38],
-    [49.28, -123.12], [19.43, -99.13],
-    [-23.55, -46.63], [-34.60, -58.38], [-12.05, -77.04], [4.71, -74.07],
-    [-33.45, -70.67], [-22.91, -43.17],
-    [51.51, -0.13], [48.86, 2.35], [52.52, 13.40], [40.42, -3.70],
-    [41.90, 12.50], [55.76, 37.62], [59.33, 18.07], [52.37, 4.90],
-    [52.23, 21.01], [41.01, 28.98], [50.45, 30.52], [53.35, -6.26],
-    [30.04, 31.24], [6.52, 3.38], [-1.29, 36.82], [-26.20, 28.04],
-    [33.57, -7.59], [9.03, 38.74],
-    [35.68, 139.69], [39.90, 116.41], [31.23, 121.47], [37.57, 126.98],
-    [19.08, 72.88], [28.61, 77.21], [13.76, 100.50], [1.35, 103.82],
-    [-6.21, 106.85], [14.60, 120.98], [21.03, 105.85], [35.69, 51.39],
-    [24.86, 67.01], [24.71, 46.68], [25.20, 55.27], [22.32, 114.17],
-    [-33.87, 151.21], [-37.81, 144.96], [-36.85, 174.76]
-  ];
-
-  function ipToGeo(ip, isSource) {
-    let h = 0;
-    for (let i = 0; i < ip.length; i++) {
-      h = ((h << 5) - h + ip.charCodeAt(i)) | 0;
-    }
-    h = Math.abs(h);
-    if (isSource) {
-      const city = SOURCE_CITIES[h % SOURCE_CITIES.length];
-      const jitterLat = (((h >> 8) % 100) / 100 - 0.5) * 0.8;
-      const jitterLon = (((h >> 16) % 100) / 100 - 0.5) * 0.8;
-      return [city[1] + jitterLon, city[0] + jitterLat];
-    }
-    return [
-      -74.0 + (((h >> 8) % 1000) / 1000 - 0.5) * 1.5,
-      40.7 + ((h % 1000) / 1000 - 0.5) * 1.5
-    ];
-  }
 
   // Wait for deck.gl to load
   const waitForDeck = setInterval(() => {
@@ -435,24 +559,19 @@ LIVE_MAP_HTML = """
 
     const {DeckGL, TileLayer, BitmapLayer, PathLayer, ScatterplotLayer, MapView} = window.deck;
 
-    // Free CartoDB dark basemap tiles — no token required
     const basemap = new TileLayer({
       id: "basemap",
       data: "https://cartodb-basemaps-a.global.ssl.fastly.net/dark_all/{z}/{x}/{y}.png",
-      minZoom: 0,
-      maxZoom: 19,
-      tileSize: 256,
+      minZoom: 0, maxZoom: 19, tileSize: 256,
       renderSubLayers: props => {
         const {boundingBox} = props.tile;
         return new BitmapLayer(props, {
-          data: null,
-          image: props.data,
+          data: null, image: props.data,
           bounds: [boundingBox[0][0], boundingBox[0][1], boundingBox[1][0], boundingBox[1][1]]
         });
       }
     });
 
-    // HTML overlay for emoji pins — renders on top of WebGL canvas
     const pinOverlay = document.createElement('div');
     pinOverlay.id = 'pin-overlay';
     document.getElementById('map-wrap').appendChild(pinOverlay);
@@ -461,7 +580,6 @@ LIVE_MAP_HTML = """
     const arrivedDsts = {};
     let pinHitTargets = [];
 
-    // Custom tooltip — rendered in HTML, not WebGL
     const tooltip = document.createElement('div');
     tooltip.style.cssText = 'position:absolute;display:none;background:rgba(15,20,30,0.9);color:#e2e8f0;font-size:0.75rem;padding:4px 8px;border-radius:4px;border:1px solid #1e293b;pointer-events:none;z-index:20;white-space:nowrap;';
     document.getElementById('map-wrap').appendChild(tooltip);
@@ -478,22 +596,19 @@ LIVE_MAP_HTML = """
         if (y < -20 || y > pinOverlay.clientHeight + 20) return;
         const el = document.createElement('span');
         el.textContent = '📍';
-        // pointer-events: none so wheel/scroll always reaches deck.gl canvas
         el.style.cssText = `position:absolute;left:${x}px;top:${y}px;font-size:22px;transform:translate(-50%,-100%);pointer-events:none;`;
         pinOverlay.appendChild(el);
         pinHitTargets.push({ x, y, ip });
       });
     }
 
-    // Proximity hit-test on mousemove — shows tooltip without blocking scroll
     document.getElementById('map-wrap').addEventListener('mousemove', e => {
       const rect = document.getElementById('map-wrap').getBoundingClientRect();
       const mx = e.clientX - rect.left;
       const my = e.clientY - rect.top;
       let found = null;
       for (const pin of pinHitTargets) {
-        const dx = mx - pin.x;
-        const dy = my - (pin.y - 14);
+        const dx = mx - pin.x, dy = my - (pin.y - 14);
         if (Math.sqrt(dx*dx + dy*dy) < 14) { found = pin; break; }
       }
       if (found) {
@@ -505,23 +620,14 @@ LIVE_MAP_HTML = """
         tooltip.style.display = 'none';
       }
     });
-    document.getElementById('map-wrap').addEventListener('mouseleave', () => {
-      tooltip.style.display = 'none';
-    });
+    document.getElementById('map-wrap').addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
 
     const deckgl = new DeckGL({
       container: "live-map",
       views: new MapView({ repeat: true }),
-      initialViewState: {
-        longitude: -40,
-        latitude: 30,
-        zoom: 2,
-        pitch: 0,
-        bearing: 0
-      },
-      controller: { minZoom: 1.1 },
-      layers: [basemap],
-      onViewStateChange: () => renderPins()
+      initialViewState: { longitude: -40, latitude: 30, zoom: 2, pitch: 0, bearing: 0 },
+      controller: { minZoom: 1.2 },
+      layers: [basemap]
     });
 
     function spawnPacket() {
@@ -531,10 +637,9 @@ LIVE_MAP_HTML = """
       const [srcLon, srcLat] = ipToGeo(srcIp, true);
       const [dstLon, dstLat] = ipToGeo(dstIp, false);
       livePackets.push({
-        ts: Date.now(),
-        attack, srcIp, dstIp,
-        src: [srcLon, srcLat],
-        dst: [dstLon, dstLat],
+        ts: Date.now(), attack, srcIp, dstIp,
+        srcCity: ipToCity(srcIp),
+        src: [srcLon, srcLat], dst: [dstLon, dstLat],
         path: buildPath(srcLat, srcLon, dstLat, dstLon)
       });
     }
@@ -549,8 +654,7 @@ LIVE_MAP_HTML = """
       livePackets = livePackets.filter(p => now - p.ts < TTL_MS);
       document.getElementById("count").textContent = livePackets.length;
 
-      const pathsByAttack = {};
-      attacks.forEach(a => { pathsByAttack[a] = []; });
+      const trailDots = [];
       const sources = [];
       const heads = [];
 
@@ -559,90 +663,82 @@ LIVE_MAP_HTML = """
         const rawProgress = Math.min(1, age / DRAW_MS);
         const progress = easeOut(rawProgress);
         const drawing = progress < 0.99;
-        if (!drawing && !p.arrivedAt) p.arrivedAt = now;
+        if (!drawing && !p.arrivedAt) {
+          p.arrivedAt = now;
+          addToLog(p);
+        }
         const opacity = drawing ? 1.0 : Math.max(0, 1 - (now - p.arrivedAt) / FADE_MS);
         if (opacity <= 0) return;
 
-        // Slice the bezier path up to current progress; convert [lat,lon] -> [lon,lat] for deck
         const N = p.path.length - 1;
         const lastIdx = Math.max(1, Math.min(N, Math.ceil(progress * N)));
-        const partial = [];
-        for (let i = 0; i <= lastIdx; i++) {
-          partial.push([p.path[i][1], p.path[i][0]]);
-        }
+        const color = colorMap[p.attack];
 
-        pathsByAttack[p.attack].push({ path: partial, opacity });
+        for (let i = 0; i <= lastIdx; i++) {
+          const pt = p.path[i];
+          trailDots.push({ position: [pt[1], pt[0]], color, opacity });
+        }
 
         sources.push({ position: p.src, opacity });
 
-        const HEAD_FADE_MS = 250;
         if (drawing) {
           const head = p.path[lastIdx];
-          heads.push({ position: [head[1], head[0]], color: colorMap[p.attack], opacity: 1.0 });
+          heads.push({ position: [head[1], head[0]], color, opacity: 1.0 });
         } else {
           const headOpacity = Math.max(0, 1 - (now - p.arrivedAt) / HEAD_FADE_MS);
           if (headOpacity > 0) {
-            const N = p.path.length - 1;
             const head = p.path[N];
-            heads.push({ position: [head[1], head[0]], color: colorMap[p.attack], opacity: headOpacity });
+            heads.push({ position: [head[1], head[0]], color, opacity: headOpacity });
           }
         }
       });
 
-      const pathLayers = attacks
-        .filter(a => pathsByAttack[a].length > 0)
-        .map(a => new PathLayer({
-          id: `path-${a}`,
-          data: pathsByAttack[a],
-          getPath: d => d.path,
-          getColor: d => [...colorMap[a], Math.round(255 * d.opacity)],
-          getWidth: 2,
-          widthUnits: "pixels",
-          jointRounded: true,
-          capRounded: true,
-          wrapLongitude: false
-        }));
+      const pathLayers = [new ScatterplotLayer({
+        id: "trails", data: trailDots,
+        getPosition: d => d.position,
+        getFillColor: d => [...d.color, Math.round(255 * d.opacity)],
+        getRadius: 1.2, radiusUnits: "pixels"
+      })];
 
       const sourceLayer = new ScatterplotLayer({
-        id: "sources",
-        data: sources,
+        id: "sources", data: sources,
         getPosition: d => d.position,
         getFillColor: d => [239, 68, 68, Math.round(220 * d.opacity)],
-        getRadius: 4,
-        radiusUnits: "pixels"
+        getRadius: 4, radiusUnits: "pixels"
       });
 
       const headLayer = new ScatterplotLayer({
-        id: "heads",
-        data: heads,
+        id: "heads", data: heads,
         getPosition: d => d.position,
         getFillColor: d => [...d.color, Math.round(255 * d.opacity)],
         getLineColor: d => [255, 255, 255, Math.round(230 * d.opacity)],
-        stroked: true,
-        getLineWidth: 1.5,
-        lineWidthUnits: "pixels",
-        getRadius: 5,
-        radiusUnits: "pixels"
+        stroked: true, getLineWidth: 1.5, lineWidthUnits: "pixels",
+        getRadius: 5, radiusUnits: "pixels"
       });
 
-      // Add newly arrived destinations to the persistent map
+      let pinsChanged = false;
       livePackets.forEach(p => {
         const age = now - p.ts;
         const progress = easeOut(Math.min(1, age / DRAW_MS));
         if (progress < 0.99) return;
         const key = p.dst.join(",");
-        if (!arrivedDsts[key]) arrivedDsts[key] = { pos: p.dst, ip: p.dstIp };
+        if (!arrivedDsts[key]) {
+          arrivedDsts[key] = { pos: p.dst, ip: p.dstIp };
+          pinsChanged = true;
+        }
       });
-      currentDstPositions = Object.values(arrivedDsts);
-      renderPins();
+      if (pinsChanged) {
+        currentDstPositions = Object.values(arrivedDsts);
+      }
 
-      deckgl.setProps({
-        layers: [basemap, ...pathLayers, sourceLayer, headLayer]
-      });
+      deckgl.setProps({ layers: [basemap, ...pathLayers, sourceLayer, headLayer] });
+      renderPins();
     }
 
-    setInterval(updateMap, FRAME_MS);
+    function animLoop() { updateMap(); requestAnimationFrame(animLoop); }
+    requestAnimationFrame(animLoop);
     setInterval(spawnTick, SPAWN_MS);
+    setInterval(() => { if (logDirty) { logDirty = false; renderLog(); } }, 100);
     spawnTick();
   }, 100);
 </script>
@@ -650,7 +746,7 @@ LIVE_MAP_HTML = """
 </html>
 """
 
-components.html(LIVE_MAP_HTML, height=560, scrolling=False)
+components.html(LIVE_MAP_HTML, height=720, scrolling=False)
 
 # Charts
 left, right = st.columns(2)
