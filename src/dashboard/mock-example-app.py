@@ -209,44 +209,80 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Generate fake data
-random.seed(42)
-attack_types = ["Benign", "Port Scan", "Brute Force", "DDoS", "Web Attack"]
-severity_map = {"Port Scan": "Low", "Brute Force": "Critical", "DDoS": "Critical", "Web Attack": "Warning", "Benign": "None"}
-data = []
-for i in range(300):
-    timestamp = datetime.now() - timedelta(minutes=random.randint(1, 1440))
-    attack = random.choices(attack_types, weights=[50, 15, 15, 10, 10])[0]
-    confidence = round(random.uniform(0.7, 0.99), 2) if attack != "Benign" else round(random.uniform(0.88, 0.99), 2)
-    src_ip = f"192.168.1.{random.randint(1, 254)}"
-    dst_ip = f"10.0.0.{random.randint(1, 50)}"
-    src_port = random.choice([22, 80, 443, 445, 3389, 8080, random.randint(1024, 65535)])
-    data.append({
-        "Timestamp": timestamp,
-        "Source IP": src_ip,
-        "Src Port": src_port,
-        "Destination IP": dst_ip,
-        "Classification": attack,
-        "Severity": severity_map[attack],
-        "Confidence": confidence
-    })
+# ---------------------------------------------------------------------------
+# MODEL INTEGRATION POINT
+# When the real model is ready, replace load_predictions() with a function
+# that calls your model or reads its output file/API. The returned DataFrame
+# must have these columns:
+#   Timestamp (datetime), Source IP (str), Src Port (int),
+#   Destination IP (str), Classification (str), Confidence (float 0-1),
+#   Severity (str: "Critical" | "Warning" | "Low" | "None")
+# ---------------------------------------------------------------------------
 
-df = pd.DataFrame(data).sort_values("Timestamp", ascending=False).reset_index(drop=True)
+SEVERITY_MAP = {
+    "Port Scan": "Low",
+    "Brute Force": "Critical",
+    "DDoS": "Critical",
+    "Web Attack": "Warning",
+    "Benign": "None",
+}
+
+MODEL_INFO = {
+    "name": "Random Forest",
+    "dataset": "CICIDS2017",
+    "f1_score": None,   # set this once the model is trained (e.g. 0.94)
+    "classes": ["Benign", "Port Scan", "Brute Force", "DDoS", "Web Attack"],
+}
+
+
+@st.cache_data(ttl=60)
+def load_predictions() -> pd.DataFrame:
+    """Return a DataFrame of model predictions.
+
+    Swap the body of this function when the real model is available.
+    The cache refreshes every 60 seconds so live data stays current.
+    """
+    random.seed(42)
+    attack_types = MODEL_INFO["classes"]
+    data = []
+    for _ in range(300):
+        timestamp = datetime.now() - timedelta(minutes=random.randint(1, 1440))
+        attack = random.choices(attack_types, weights=[50, 15, 15, 10, 10])[0]
+        confidence = round(random.uniform(0.7, 0.99), 2) if attack != "Benign" else round(random.uniform(0.88, 0.99), 2)
+        src_ip = f"192.168.1.{random.randint(1, 254)}"
+        dst_ip = f"10.0.0.{random.randint(1, 50)}"
+        src_port = random.choice([22, 80, 443, 445, 3389, 8080, random.randint(1024, 65535)])
+        data.append({
+            "Timestamp": timestamp,
+            "Source IP": src_ip,
+            "Src Port": src_port,
+            "Destination IP": dst_ip,
+            "Classification": attack,
+            "Severity": SEVERITY_MAP.get(attack, "Unknown"),
+            "Confidence": confidence,
+        })
+    return pd.DataFrame(data).sort_values("Timestamp", ascending=False).reset_index(drop=True)
+
+
+df = load_predictions()
+available_classes = sorted(df["Classification"].unique().tolist())
+available_severities = sorted(df["Severity"].unique().tolist())
 
 # Sidebar
 with st.sidebar:
     st.markdown("### Filters")
     st.markdown("---")
-    selected_types = st.multiselect("Attack Type", attack_types, default=attack_types)
+    selected_types = st.multiselect("Attack Type", available_classes, default=available_classes)
     min_confidence = st.slider("Min Confidence", 0.0, 1.0, 0.7)
-    severity_filter = st.multiselect("Severity", ["Critical", "Warning", "Low", "None"], default=["Critical", "Warning", "Low", "None"])
+    severity_filter = st.multiselect("Severity", available_severities, default=available_severities)
     st.markdown("---")
     st.markdown("##### Model Info")
-    st.markdown("""
+    f1_display = f"{MODEL_INFO['f1_score']:.2f}" if MODEL_INFO["f1_score"] is not None else "Pending"
+    st.markdown(f"""
     <div style='color: #64748b; font-size: 0.8rem; line-height: 1.6;'>
-    Model: Random Forest<br>
-    Dataset: CICIDS2017<br>
-    F1 Score: 0.94<br>
+    Model: {MODEL_INFO['name']}<br>
+    Dataset: {MODEL_INFO['dataset']}<br>
+    F1 Score: {f1_display}<br>
     Status: <span class='live-dot'></span><span style='color: #22c55e;'>Active</span>
     </div>
     """, unsafe_allow_html=True)
