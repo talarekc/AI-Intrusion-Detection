@@ -86,8 +86,8 @@ CSV_PATH = next((p for p in POSSIBLE_PATHS if os.path.exists(p)), None)
 if CSV_PATH is None:
     st.error("Dataset not found. Download CICIDS2017 and update the path in dashboard.py")
     st.stop()
-MODEL_PATH = r"C:\Users\brian\OneDrive - Sacred Heart University\main model\models\random_forest_model.joblib"
-ENCODER_PATH = r"C:\Users\brian\OneDrive - Sacred Heart University\main model\models\label_encoder.joblib"
+MODEL_PATH = r"C:\Users\brian\OneDrive - Sacred Heart University\main\models\random_forest_model.joblib"
+ENCODER_PATH = r"C:\Users\brian\OneDrive - Sacred Heart University\main\models\label_encoder.joblib"
 
 # ---------------------------------------------------------------------------
 # MODEL LOADING
