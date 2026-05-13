@@ -16,3 +16,6 @@ __pycache__/
 
 # Large data files
 *.csv
+
+#Dataset
+*.zip
