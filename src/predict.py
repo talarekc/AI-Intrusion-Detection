@@ -1,4 +1,5 @@
 import os
+import numpy as np
 import pandas as pd
 import joblib
 from datetime import datetime
@@ -81,16 +82,22 @@ def get_severity(label):
     else:
         return "Medium"
 
+# Spread timestamps across the last 24 hours so the timeline chart shows activity over time
+now = datetime.now()
+timestamps = [now - pd.Timedelta(seconds=i * (86400 / len(attack_labels))) for i in range(len(attack_labels))]
+
 # Create dashboard-ready output
 results = pd.DataFrame({
-    "timestamp": [datetime.now().strftime("%Y-%m-%d %H:%M:%S")] * len(attack_labels),
+    "timestamp": [t.strftime("%Y-%m-%d %H:%M:%S") for t in timestamps],
     "attack_type": attack_labels,
     "confidence": confidence_scores.round(2),
     "severity": [get_severity(label) for label in attack_labels]
 })
 
 # Save prediction output for dashboard
-results.to_csv(os.path.join(REPO_ROOT, "data", "prediction_output.csv"), index=False)
+output_path = os.path.join(REPO_ROOT, "data", "prediction_output.csv")
+os.makedirs(os.path.dirname(output_path), exist_ok=True)
+results.to_csv(output_path, index=False)
 
 print("Multi-class predictions generated successfully.")
 print(results.head())
