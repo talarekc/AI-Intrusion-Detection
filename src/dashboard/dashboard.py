@@ -1,14 +1,10 @@
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
-import numpy as np
 import plotly.express as px
-import plotly.graph_objects as go
-import joblib
 import random
 import json
 import os
-from datetime import datetime, timedelta
 
 # Page setup
 st.set_page_config(page_title="AI Threat Detection Dashboard", layout="wide", initial_sidebar_state="expanded")
@@ -61,84 +57,43 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
-# CONFIG — update these paths if needed
+# CONFIG - update these paths if needed
 # ---------------------------------------------------------------------------
 
-SEVERITY_MAP = {
-    "BENIGN": "None",
-    "DDoS": "Critical",
-}
 
 MODEL_INFO = {
     "name": "Random Forest",
     "dataset": "CICIDS2017",
     "f1_score": 0.9999,
-    "classes": ["BENIGN", "DDoS"],
+    "classes": ["BENIGN", "DDoS", "Port Scan", "Brute Force", "Web Attack"],
 }
 
-POSSIBLE_PATHS = [
-    r"C:\Users\brian\OneDrive - Sacred Heart University\CIC-IDS-2017\MachineLearningCSV\MachineLearningCVE\Friday-WorkingHours-Afternoon-DDos.pcap_ISCX.csv",
-    r"C:\Users\bagsg\OneDrive - Sacred Heart University\CIC-IDS-2017\MachineLearningCSV\MachineLearningCVE\Friday-WorkingHours-Afternoon-DDos.pcap_ISCX.csv",
-  # r"C:\Users\cole\...", (REMOVE COMMENT AND UPDATE PATH)
-  # r"C:\Users\frank\...", (REMOVE COMMENT AND UPDATE PATH)
-]
-
-CSV_PATH = next((p for p in POSSIBLE_PATHS if os.path.exists(p)), None)
-if CSV_PATH is None:
-    st.error("Dataset not found. Download CICIDS2017 and update the path in dashboard.py")
-    st.stop()
-MODEL_PATH = next((p for p in [
-    r"C:\Users\brian\OneDrive - Sacred Heart University\main\models\random_forest_model.joblib",
-    r"C:\Users\bagsg\OneDrive - Sacred Heart University\main\models\random_forest_model.joblib",
-] if os.path.exists(p)), None)
-ENCODER_PATH = next((p for p in [
-    r"C:\Users\brian\OneDrive - Sacred Heart University\main\models\label_encoder.joblib",
-    r"C:\Users\bagsg\OneDrive - Sacred Heart University\main\models\label_encoder.joblib",
-] if os.path.exists(p)), None)
-
-# ---------------------------------------------------------------------------
-# MODEL LOADING
-# ---------------------------------------------------------------------------
-
-@st.cache_resource
-def load_model():
-    if MODEL_PATH is None or ENCODER_PATH is None:
-        st.error("Model files not found. Update the model paths in dashboard.py")
-        st.stop()
-    model = joblib.load(MODEL_PATH)
-    encoder = joblib.load(ENCODER_PATH)
-    return model, encoder
+# Path to Cole's prediction output CSV (repo-relative)
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+CSV_PATH = os.path.join(REPO_ROOT, "data", "prediction_output.csv")
 
 # ---------------------------------------------------------------------------
 # PREDICTIONS
 # ---------------------------------------------------------------------------
 
+if not os.path.exists(CSV_PATH):
+    st.info("Waiting for predictions... Run `python src/predict.py` from the repo root to generate data.")
+    st.stop()
+
 @st.cache_data(ttl=60)
 def load_predictions() -> pd.DataFrame:
-    model, encoder = load_model()
-
-    df_raw = pd.read_csv(CSV_PATH)
-    df_raw = df_raw.drop_duplicates()
-    df_raw = df_raw.replace([np.inf, -np.inf], np.nan)
-    df_raw = df_raw.dropna()
-
-    X = df_raw.drop(' Label', axis=1)
-
-    y_pred = model.predict(X)
-    y_conf = model.predict_proba(X).max(axis=1)
-    labels = encoder.inverse_transform(y_pred)
-
-    result = pd.DataFrame({
-        "Timestamp": pd.Timestamp.now() - pd.to_timedelta(np.arange(len(labels)) * 30, unit='s'),
-        "Source IP": [f"192.168.1.{i%254+1}" for i in range(len(labels))],
-        "Src Port": [random.choice([22, 80, 443, 445, 3389, 8080]) for _ in range(len(labels))],
-        "Destination IP": [f"10.0.0.{i%50+1}" for i in range(len(labels))],
-        "Classification": labels,
-        "Confidence": y_conf,
-        "Severity": [SEVERITY_MAP.get(l, "Unknown") for l in labels],
+    df = pd.read_csv(CSV_PATH)
+    df = df.rename(columns={
+        "timestamp":   "Timestamp",
+        "attack_type": "Classification",
+        "confidence":  "Confidence",
+        "severity":    "Severity",
     })
-
-    return result.sort_values("Timestamp", ascending=False).reset_index(drop=True)
+    df["Timestamp"] = pd.to_datetime(df["Timestamp"])
+    df["Source IP"] = [f"192.168.1.{i%254+1}" for i in range(len(df))]
+    df["Src Port"]  = [random.choice([22, 80, 443, 445, 3389, 8080]) for _ in range(len(df))]
+    df["Destination IP"] = [f"10.0.0.{i%50+1}" for i in range(len(df))]
+    return df.sort_values("Timestamp", ascending=False).reset_index(drop=True)
 
 
 df = load_predictions()
@@ -232,26 +187,37 @@ chart_layout = dict(
 )
 
 color_map = {
-    "DDoS": "#ef4444",
-    "BENIGN": "#22c55e",
+    "BENIGN":      "#22c55e",
+    "DDoS":        "#ef4444",
+    "Port Scan":   "#3b82f6",
+    "Brute Force": "#f97316",
+    "Web Attack":  "#a855f7",
 }
 
 # ---------------------------------------------------------------------------
-# LIVE MAP — driven by real model predictions
+# LIVE MAP - driven by live capture (capture.py)
 # ---------------------------------------------------------------------------
 
-st.markdown('<div class="section-title">Live Traffic Map: Real Model Predictions</div>', unsafe_allow_html=True)
+st.markdown('<div class="section-title">Live Traffic Map</div>', unsafe_allow_html=True)
 
-# Pass real classified events into the JS map (sample up to 300)
-map_sample = pd.DataFrame(columns=threats.columns)
+# Read live events written by capture.py - empty when no attack is running
+LIVE_EVENTS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "live_events.json")
 map_events = []
-for _, row in map_sample.iterrows():
-    map_events.append({
-        "srcIp": row["Source IP"],
-        "dstIp": row["Destination IP"],
-        "attack": row["Classification"],
-        "confidence": round(float(row["Confidence"]), 3),
-    })
+if os.path.exists(LIVE_EVENTS_PATH):
+    try:
+        with open(LIVE_EVENTS_PATH, "r") as f:
+            raw = json.load(f)
+        map_events = [
+            {
+                "srcIp":      e.get("srcIp", "0.0.0.0"),
+                "dstIp":      e.get("dstIp", "0.0.0.0"),
+                "attack":     e.get("attack", "Unknown"),
+                "confidence": round(float(e.get("confidence", 0)), 3),
+            }
+            for e in raw if e.get("attack") != "BENIGN"
+        ]
+    except (json.JSONDecodeError, IOError):
+        map_events = []
 
 map_events_json = json.dumps(map_events)
 
@@ -289,14 +255,17 @@ LIVE_MAP_HTML = f"""
 </style>
 </head>
 <body>
-  <div id="status"><span class="dot"></span>Replaying <span id="count">0</span> model-classified events</div>
+  <div id="status"><span class="dot"></span>Live monitoring | <span id="count">0</span> packets in flight</div>
   <div id="map-wrap">
     <div id="live-map"></div>
     <div class="legend">
       <div class="legend-row">Model Output</div>
       <div class="legend-item"><div class="legend-box" style="background:#ef4444;"></div> DDoS</div>
+      <div class="legend-item"><div class="legend-box" style="background:#3b82f6;"></div> Port Scan</div>
+      <div class="legend-item"><div class="legend-box" style="background:#f97316;"></div> Brute Force</div>
+      <div class="legend-item"><div class="legend-box" style="background:#a855f7;"></div> Web Attack</div>
       <div class="legend-item"><div class="legend-box" style="background:#22c55e;"></div> BENIGN</div>
-      <div class="legend-item"><div class="legend-box" style="background:#3b82f6;width:10px;height:10px;border-radius:50%;"></div> Target (SHU)</div>
+      <div class="legend-item"><div class="legend-box" style="background:#ffffff;width:10px;height:10px;border-radius:50%;"></div> Target (SHU)</div>
     </div>
   </div>
   <div id="alert-panel">
@@ -307,7 +276,7 @@ LIVE_MAP_HTML = f"""
     <div id="alert-scroll">
       <table id="alert-table">
         <thead><tr><th>Time</th><th>Source IP</th><th>Dest IP</th><th>Classification</th><th>Confidence</th></tr></thead>
-        <tbody id="alert-tbody"><tr><td colspan="5" style="color:#475569;text-align:center;padding:16px;">Loading model predictions...</td></tr></tbody>
+        <tbody id="alert-tbody"><tr><td colspan="5" style="color:#475569;text-align:center;padding:16px;">Waiting for live threats. Run capture.py to begin monitoring.</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -315,17 +284,23 @@ LIVE_MAP_HTML = f"""
   const MODEL_EVENTS = {map_events_json};
 
   const COLOR_MAP = {{
-    "DDoS":   [239, 68,  68],
-    "BENIGN": [34,  197, 94],
+    "BENIGN":      [34,  197, 94],
+    "DDoS":        [239, 68,  68],
+    "Port Scan":   [59,  130, 246],
+    "Brute Force": [249, 115, 22],
+    "Web Attack":  [168, 85,  247],
   }};
   const BADGE_STYLE = {{
-    "DDoS":   {{ bg:"#450a0a", text:"#fca5a5" }},
-    "BENIGN": {{ bg:"#14532d", text:"#86efac" }},
+    "BENIGN":      {{ bg:"#14532d", text:"#86efac" }},
+    "DDoS":        {{ bg:"#450a0a", text:"#fca5a5" }},
+    "Port Scan":   {{ bg:"#1e3a5f", text:"#93c5fd" }},
+    "Brute Force": {{ bg:"#431407", text:"#fed7aa" }},
+    "Web Attack":  {{ bg:"#3b0764", text:"#e9d5ff" }},
   }};
 
   const DRAW_MS = 1200, FADE_MS = 600, TTL_MS = 1800, PATH_POINTS = 360, HEAD_FADE_MS = 300;
 
-  // Sacred Heart University — the target
+  // Sacred Heart University - the target
   const TARGET = {{ lat: 41.221288, lon: -73.241378 }};
 
   // Global cities for source geo approximation (dataset IPs are internal)
@@ -460,7 +435,7 @@ LIVE_MAP_HTML = f"""
     function updateMap() {{
       const now = Date.now();
       livePackets = livePackets.filter(p => now - p.ts < TTL_MS);
-      document.getElementById('count').textContent = MODEL_EVENTS.length;
+      document.getElementById('count').textContent = livePackets.length;
 
       const trailDots = [], sources = [], heads = [];
 
