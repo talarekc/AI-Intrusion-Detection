@@ -78,6 +78,7 @@ MODEL_INFO = {
 
 POSSIBLE_PATHS = [
     r"C:\Users\brian\OneDrive - Sacred Heart University\CIC-IDS-2017\MachineLearningCSV\MachineLearningCVE\Friday-WorkingHours-Afternoon-DDos.pcap_ISCX.csv",
+    r"C:\Users\bagsg\OneDrive - Sacred Heart University\CIC-IDS-2017\MachineLearningCSV\MachineLearningCVE\Friday-WorkingHours-Afternoon-DDos.pcap_ISCX.csv",
   # r"C:\Users\cole\...", (REMOVE COMMENT AND UPDATE PATH)
   # r"C:\Users\frank\...", (REMOVE COMMENT AND UPDATE PATH)
 ]
@@ -86,8 +87,14 @@ CSV_PATH = next((p for p in POSSIBLE_PATHS if os.path.exists(p)), None)
 if CSV_PATH is None:
     st.error("Dataset not found. Download CICIDS2017 and update the path in dashboard.py")
     st.stop()
-MODEL_PATH = r"C:\Users\brian\OneDrive - Sacred Heart University\main\models\random_forest_model.joblib"
-ENCODER_PATH = r"C:\Users\brian\OneDrive - Sacred Heart University\main\models\label_encoder.joblib"
+MODEL_PATH = next((p for p in [
+    r"C:\Users\brian\OneDrive - Sacred Heart University\main\models\random_forest_model.joblib",
+    r"C:\Users\bagsg\OneDrive - Sacred Heart University\main\models\random_forest_model.joblib",
+] if os.path.exists(p)), None)
+ENCODER_PATH = next((p for p in [
+    r"C:\Users\brian\OneDrive - Sacred Heart University\main\models\label_encoder.joblib",
+    r"C:\Users\bagsg\OneDrive - Sacred Heart University\main\models\label_encoder.joblib",
+] if os.path.exists(p)), None)
 
 # ---------------------------------------------------------------------------
 # MODEL LOADING
@@ -95,6 +102,9 @@ ENCODER_PATH = r"C:\Users\brian\OneDrive - Sacred Heart University\main\models\l
 
 @st.cache_resource
 def load_model():
+    if MODEL_PATH is None or ENCODER_PATH is None:
+        st.error("Model files not found. Update the model paths in dashboard.py")
+        st.stop()
     model = joblib.load(MODEL_PATH)
     encoder = joblib.load(ENCODER_PATH)
     return model, encoder
@@ -316,7 +326,7 @@ LIVE_MAP_HTML = f"""
   const DRAW_MS = 1200, FADE_MS = 600, TTL_MS = 1800, PATH_POINTS = 360, HEAD_FADE_MS = 300;
 
   // Sacred Heart University — the target
-  const TARGET = {{ lat: 41.1543, lon: -73.2571 }};
+  const TARGET = {{ lat: 41.221288, lon: -73.241378 }};
 
   // Global cities for source geo approximation (dataset IPs are internal)
   const CITIES = [
