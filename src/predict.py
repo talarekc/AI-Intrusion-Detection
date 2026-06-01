@@ -1,18 +1,30 @@
+import os
+import numpy as np
 import pandas as pd
 import joblib
 from datetime import datetime
 
-# Load multi-class trained model and label encoder
-model = joblib.load("models/random_forest_multiclass_model.joblib")
-label_encoder = joblib.load("models/multiclass_label_encoder.joblib")
+# Repo root (one level up from src/)
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# Load sample traffic data
-# This can be changed later depending on what dataset/file Brian wants to test
+# Load multi-class trained model and label encoder
+model = joblib.load(os.path.join(REPO_ROOT, "models", "random_forest_multiclass_model.joblib"))
+label_encoder = joblib.load(os.path.join(REPO_ROOT, "models", "multiclass_label_encoder.joblib"))
+
+# Raw CSV locations — works for both brian and bagsg
+DATA_ROOTS = [
+    r"C:\Users\brian\OneDrive - Sacred Heart University\CIC-IDS-2017\MachineLearningCSV\MachineLearningCVE",
+    r"C:\Users\bagsg\OneDrive - Sacred Heart University\CIC-IDS-2017\MachineLearningCSV\MachineLearningCVE",
+]
+DATA_DIR = next((p for p in DATA_ROOTS if os.path.exists(p)), None)
+if DATA_DIR is None:
+    raise FileNotFoundError("CIC-IDS-2017 dataset not found. Update DATA_ROOTS in predict.py.")
+
 files = [
-    "data/Friday-WorkingHours-Afternoon-DDos.pcap_ISCX.csv",
-    "data/Friday-WorkingHours-Afternoon-PortScan.pcap_ISCX.csv",
-    "data/Tuesday-WorkingHours.pcap_ISCX.csv",
-    "data/Thursday-WorkingHours-Morning-WebAttacks.pcap_ISCX.csv"
+    os.path.join(DATA_DIR, "Friday-WorkingHours-Afternoon-DDos.pcap_ISCX.csv"),
+    os.path.join(DATA_DIR, "Friday-WorkingHours-Afternoon-PortScan.pcap_ISCX.csv"),
+    os.path.join(DATA_DIR, "Tuesday-WorkingHours.pcap_ISCX.csv"),
+    os.path.join(DATA_DIR, "Thursday-WorkingHours-Morning-WebAttacks.pcap_ISCX.csv"),
 ]
 
 # Load and randomly sample rows from each file
@@ -70,16 +82,22 @@ def get_severity(label):
     else:
         return "Medium"
 
+# Spread timestamps across the last 24 hours so the timeline chart shows activity over time
+now = datetime.now()
+timestamps = [now - pd.Timedelta(seconds=i * (86400 / len(attack_labels))) for i in range(len(attack_labels))]
+
 # Create dashboard-ready output
 results = pd.DataFrame({
-    "timestamp": [datetime.now().strftime("%Y-%m-%d %H:%M:%S")] * len(attack_labels),
+    "timestamp": [t.strftime("%Y-%m-%d %H:%M:%S") for t in timestamps],
     "attack_type": attack_labels,
     "confidence": confidence_scores.round(2),
     "severity": [get_severity(label) for label in attack_labels]
 })
 
 # Save prediction output for dashboard
-results.to_csv("data/prediction_output.csv", index=False)
+output_path = os.path.join(REPO_ROOT, "data", "prediction_output.csv")
+os.makedirs(os.path.dirname(output_path), exist_ok=True)
+results.to_csv(output_path, index=False)
 
 print("Multi-class predictions generated successfully.")
 print(results.head())

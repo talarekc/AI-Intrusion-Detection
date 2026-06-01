@@ -29,8 +29,8 @@ except ImportError:
 # PATHS
 # ---------------------------------------------------------------------------
 
-MODEL_PATH   = r"C:\Users\brian\OneDrive - Sacred Heart University\AI-Intrusion-Detection\main model\models\random_forest_model.joblib"
-ENCODER_PATH = r"C:\Users\brian\OneDrive - Sacred Heart University\AI-Intrusion-Detection\main model\models\label_encoder.joblib"
+MODEL_PATH   = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models", "random_forest_multiclass_model.joblib")
+ENCODER_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models", "multiclass_label_encoder.joblib")
 OUTPUT_PATH  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard", "live_events.json")
 
 # Seconds of inactivity before a flow is considered finished
