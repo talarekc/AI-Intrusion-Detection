@@ -2,12 +2,17 @@ import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
 import plotly.express as px
-import random
 import json
 import os
+from datetime import datetime, timedelta
 
 # Page setup
 st.set_page_config(page_title="AI Threat Detection Dashboard", layout="wide", initial_sidebar_state="expanded")
+
+# NOTE: no st_autorefresh - it reloads the whole page (causes a black flash).
+# The map/log/summary update live inside the iframe. The charts below re-read
+# alert_history.json whenever the page reruns for any reason (e.g. a filter
+# change), and there is a manual "Refresh charts" button next to them.
 
 # Custom CSS
 st.markdown("""
@@ -68,37 +73,49 @@ MODEL_INFO = {
     "classes": ["BENIGN", "DDoS", "Port Scan", "Brute Force", "Web Attack"],
 }
 
-# Path to Cole's prediction output CSV (repo-relative)
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-CSV_PATH = os.path.join(REPO_ROOT, "data", "prediction_output.csv")
-
 # ---------------------------------------------------------------------------
-# PREDICTIONS
+# CAPTURED THREATS - the ENTIRE dashboard is driven by the real attacks captured
+# by capture.py and saved to alert_history.json. There is no mock/CSV data: the
+# metric cards, charts, alert log and map all reflect the simulated attacks you
+# actually run, and the Clear log button empties everything.
 # ---------------------------------------------------------------------------
 
-if not os.path.exists(CSV_PATH):
-    st.info("Waiting for predictions... Run `python src/predict.py` from the repo root to generate data.")
-    st.stop()
+ALERT_HISTORY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "alert_history.json")
 
-@st.cache_data(ttl=60)
-def load_predictions() -> pd.DataFrame:
-    df = pd.read_csv(CSV_PATH)
-    df = df.rename(columns={
-        "timestamp":   "Timestamp",
-        "attack_type": "Classification",
-        "confidence":  "Confidence",
-        "severity":    "Severity",
-    })
-    df["Timestamp"] = pd.to_datetime(df["Timestamp"])
-    df["Source IP"] = [f"192.168.1.{i%254+1}" for i in range(len(df))]
-    df["Src Port"]  = [random.choice([22, 80, 443, 445, 3389, 8080]) for _ in range(len(df))]
-    df["Destination IP"] = [f"10.0.0.{i%50+1}" for i in range(len(df))]
-    return df.sort_values("Timestamp", ascending=False).reset_index(drop=True)
+# Clear-log state lives in session_state so the button (rendered later, next to
+# the map) can wipe everything on the SAME run, before any data is loaded below.
+clear_log = st.session_state.pop("do_clear_log", False)
+if clear_log:
+    # Wipe the saved alert history AND the current live events, so a scan that is
+    # still in flight can't immediately re-populate the log after clearing.
+    for _p in (
+        ALERT_HISTORY_PATH,
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "live_events.json"),
+    ):
+        try:
+            if os.path.exists(_p):
+                os.remove(_p)
+        except OSError:
+            pass
 
+_captured_rows = []
+if not clear_log and os.path.exists(ALERT_HISTORY_PATH):
+    try:
+        with open(ALERT_HISTORY_PATH, "r") as f:
+            _captured_rows = json.load(f)
+    except (json.JSONDecodeError, IOError):
+        _captured_rows = []
 
-df = load_predictions()
-available_classes = sorted(df["Classification"].unique().tolist())
-available_severities = sorted(df["Severity"].unique().tolist())
+captured = pd.DataFrame(_captured_rows, columns=["time", "ts", "srcIp", "dstIp", "attack", "confidence"])
+if not captured.empty:
+    captured = captured.rename(columns={"attack": "Classification", "confidence": "Confidence"})
+    captured["Timestamp"] = pd.to_datetime(captured["ts"], errors="coerce")
+    captured["Confidence"] = pd.to_numeric(captured["Confidence"], errors="coerce").fillna(0.0)
+else:
+    captured = pd.DataFrame(columns=["Classification", "Confidence", "Timestamp", "srcIp", "dstIp"])
+
+# Attack types the model can report (used for the filter list and chart colors).
+ATTACK_CLASSES = ["DDoS", "Port Scan", "Brute Force", "Web Attack"]
 
 # ---------------------------------------------------------------------------
 # SIDEBAR
@@ -107,9 +124,8 @@ available_severities = sorted(df["Severity"].unique().tolist())
 with st.sidebar:
     st.markdown("### Filters")
     st.markdown("---")
-    selected_types = st.multiselect("Attack Type", available_classes, default=available_classes)
+    selected_types = st.multiselect("Attack Type", ATTACK_CLASSES, default=ATTACK_CLASSES)
     min_confidence = st.slider("Min Confidence", 0.0, 1.0, 0.7)
-    severity_filter = st.multiselect("Severity", available_severities, default=available_severities)
     st.markdown("---")
     st.markdown("##### Model Info")
     f1_display = f"{MODEL_INFO['f1_score']:.4f}" if MODEL_INFO["f1_score"] is not None else "Pending"
@@ -122,17 +138,12 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
-# ---------------------------------------------------------------------------
-# FILTERS
-# ---------------------------------------------------------------------------
-
-filtered = df[
-    (df["Classification"].isin(selected_types)) &
-    (df["Confidence"] >= min_confidence) &
-    (df["Severity"].isin(severity_filter))
+# Apply the sidebar filters to the captured attacks.
+captured_threats = captured[
+    captured["Classification"].isin(selected_types)
+    & (captured["Confidence"] >= min_confidence)
+    & (captured["Classification"] != "BENIGN")
 ]
-
-threats = filtered[filtered["Classification"] != "BENIGN"]
 
 # ---------------------------------------------------------------------------
 # HEADER
@@ -141,38 +152,9 @@ threats = filtered[filtered["Classification"] != "BENIGN"]
 st.markdown('<div class="main-header">AI Threat Detection Dashboard</div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-header"><span class="live-dot"></span>Monitoring network traffic in real time</div>', unsafe_allow_html=True)
 
-# ---------------------------------------------------------------------------
-# METRIC CARDS
-# ---------------------------------------------------------------------------
-
-col1, col2, col3, col4 = st.columns(4)
-with col1:
-    st.markdown(f"""
-    <div class="metric-card">
-        <div class="metric-label">Total Events</div>
-        <div class="metric-value blue">{len(filtered)}</div>
-    </div>""", unsafe_allow_html=True)
-with col2:
-    st.markdown(f"""
-    <div class="metric-card">
-        <div class="metric-label">Threats Detected</div>
-        <div class="metric-value red">{len(threats)}</div>
-    </div>""", unsafe_allow_html=True)
-with col3:
-    st.markdown(f"""
-    <div class="metric-card">
-        <div class="metric-label">Benign Traffic</div>
-        <div class="metric-value green">{len(filtered) - len(threats)}</div>
-    </div>""", unsafe_allow_html=True)
-with col4:
-    avg_conf = f"{threats['Confidence'].mean():.0%}" if len(threats) > 0 else "N/A"
-    st.markdown(f"""
-    <div class="metric-card">
-        <div class="metric-label">Avg Threat Confidence</div>
-        <div class="metric-value yellow">{avg_conf}</div>
-    </div>""", unsafe_allow_html=True)
-
-st.markdown("")
+# NOTE: the four summary cards (Threats Detected / Attack Types / Attacking
+# Sources / Avg Threat Confidence) now live INSIDE the live map iframe, just
+# above the alert log, so they update live and stay exactly 1:1 with the log.
 
 # ---------------------------------------------------------------------------
 # CHART CONFIG
@@ -198,7 +180,15 @@ color_map = {
 # LIVE MAP - driven by live capture (capture.py)
 # ---------------------------------------------------------------------------
 
-st.markdown('<div class="section-title">Live Traffic Map</div>', unsafe_allow_html=True)
+_title_col, _btn_col = st.columns([4, 1], vertical_alignment="center")
+with _title_col:
+    st.markdown('<div class="section-title" style="margin:0;border:none;padding:0;">Live Traffic Map</div>', unsafe_allow_html=True)
+with _btn_col:
+    # Set a flag and rerun; the handler at the top of the script does the actual
+    # wipe before any data is loaded, so metrics, charts, log and map all clear.
+    if st.button("🗑 Clear log", use_container_width=True):
+        st.session_state["do_clear_log"] = True
+        st.rerun()
 
 # Read live events written by capture.py - empty when no attack is running
 LIVE_EVENTS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "live_events.json")
@@ -219,10 +209,47 @@ if os.path.exists(LIVE_EVENTS_PATH):
     except (json.JSONDecodeError, IOError):
         map_events = []
 
+# Load the saved alert history to seed the map iframe's log on first render.
+# From here on, the iframe itself appends new alerts and POSTs them back to
+# serve_events.py (no Streamlit reruns), so the map can stay live without the
+# page reloading. We just read + apply the rolling 24h window here.
+alert_history = []
+if not clear_log and os.path.exists(ALERT_HISTORY_PATH):
+    try:
+        with open(ALERT_HISTORY_PATH, "r") as f:
+            alert_history = json.load(f)
+    except (json.JSONDecodeError, IOError):
+        alert_history = []
+
+# Rolling 24-hour window: drop alerts older than a day. The table only shows the
+# time (no date), so keeping older rows would be ambiguous. Rows without a "ts"
+# are from before this change; keep them so nothing is wiped unexpectedly.
+cutoff = (datetime.now() - timedelta(hours=24)).isoformat(timespec="seconds")
+alert_history = [a for a in alert_history if a.get("ts", cutoff) >= cutoff]
+
+try:
+    with open(ALERT_HISTORY_PATH, "w") as f:
+        json.dump(alert_history, f)
+except IOError:
+    pass
+
+# The map still animates the *current* events; the alert log shows full history.
 map_events_json = json.dumps(map_events)
+alert_history_json = json.dumps(alert_history)
+# Tell the iframe to start empty AND overwrite disk when Clear log was pressed,
+# so the still-running old iframe can't re-POST the old log back.
+clear_log_js = "true" if clear_log else "false"
+# Nonce only changes on a CLEAR, forcing Streamlit to remount a fresh iframe so
+# the old poll loop can't keep the log alive. It must NOT depend on the live
+# history length, or the iframe would remount on every refresh and reset the map
+# view. A persistent counter keeps the HTML stable between clears.
+if clear_log:
+    st.session_state["clear_nonce"] = st.session_state.get("clear_nonce", 0) + 1
+iframe_nonce = st.session_state.get("clear_nonce", 0)
 
 LIVE_MAP_HTML = f"""
 <!DOCTYPE html>
+<!-- nonce:{iframe_nonce} -->
 <html>
 <head>
 <meta charset="utf-8">
@@ -241,17 +268,27 @@ LIVE_MAP_HTML = f"""
   .legend-item {{ display: flex; align-items: center; margin-bottom: 5px; }}
   .legend-item:last-child {{ margin-bottom: 0; }}
   .legend-box {{ width: 16px; height: 3px; margin-right: 8px; border-radius: 1px; }}
+  #summary-bar {{ display: flex; gap: 10px; padding: 8px 10px; flex-shrink: 0; background: #0a0e17; border-top: 1px solid #1e293b; }}
+  .summary-card {{ flex: 1; background: linear-gradient(135deg, #111827, #1e293b); border: 1px solid #1e293b; border-radius: 10px; padding: 8px 12px; text-align: center; }}
+  .summary-value {{ font-size: 1.5rem; font-weight: 700; line-height: 1.1; }}
+  .summary-label {{ font-size: 0.62rem; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 2px; }}
   #alert-panel {{ flex-shrink: 0; height: 215px; background: #0d1117; border-top: 1px solid #1e293b; display: flex; flex-direction: column; overflow: hidden; }}
   #alert-panel-header {{ display: flex; justify-content: space-between; align-items: center; padding: 5px 12px; border-bottom: 1px solid #1e293b; flex-shrink: 0; }}
   #alert-panel-header .title {{ font-size: 0.75rem; font-weight: 600; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.06em; }}
   #alert-count {{ font-size: 0.72rem; color: #475569; }}
   #alert-scroll {{ overflow-y: auto; overflow-x: auto; flex: 1; }}
   #alert-table {{ width: 100%; border-collapse: collapse; font-size: 0.74rem; }}
-  #alert-table thead th {{ position: sticky; top: 0; background: #111827; color: #475569; text-transform: uppercase; font-size: 0.63rem; letter-spacing: 0.05em; padding: 3px 10px; text-align: left; border-bottom: 1px solid #1e293b; white-space: nowrap; }}
+  #alert-table thead th {{ position: sticky; top: 0; z-index: 2; background: #111827; color: #475569; text-transform: uppercase; font-size: 0.63rem; letter-spacing: 0.05em; padding: 3px 10px; text-align: left; border-bottom: 1px solid #1e293b; white-space: nowrap; }}
   #alert-table td {{ padding: 3px 10px; color: #cbd5e1; border-bottom: 1px solid rgba(30,41,59,0.4); white-space: nowrap; }}
   #alert-table tr:hover td {{ background: rgba(30,41,59,0.4); }}
-  @keyframes rowIn {{ from {{ background: rgba(239,68,68,0.15); }} to {{ background: transparent; }} }}
-  .row-new {{ animation: rowIn 1.5s ease forwards; }}
+  @keyframes rowIn {{
+    from {{ opacity: 0; transform: translateY(8px); background: rgba(239,68,68,0.15); }}
+    to   {{ opacity: 1; transform: translateY(0);   background: transparent; }}
+  }}
+  /* Animate the cells, not the <tr>: transforms on table rows are unreliable across browsers.
+     No "forwards" so the cells return to their natural state (no lingering transform, which
+     would otherwise paint the row on top of the sticky header). */
+  .row-new td {{ animation: rowIn 0.45s ease-out; }}
 </style>
 </head>
 <body>
@@ -267,6 +304,12 @@ LIVE_MAP_HTML = f"""
       <div class="legend-item"><div class="legend-box" style="background:#22c55e;"></div> BENIGN</div>
       <div class="legend-item"><div class="legend-box" style="background:#ffffff;width:10px;height:10px;border-radius:50%;"></div> Target (SHU)</div>
     </div>
+  </div>
+  <div id="summary-bar">
+    <div class="summary-card"><div class="summary-value" style="color:#ef4444;" id="sum-threats">0</div><div class="summary-label">Threats Detected</div></div>
+    <div class="summary-card"><div class="summary-value" style="color:#3b82f6;" id="sum-types">0</div><div class="summary-label">Attack Types</div></div>
+    <div class="summary-card"><div class="summary-value" style="color:#eab308;" id="sum-sources">0</div><div class="summary-label">Attacking Sources</div></div>
+    <div class="summary-card"><div class="summary-value" style="color:#22c55e;" id="sum-conf">N/A</div><div class="summary-label">Avg Threat Confidence</div></div>
   </div>
   <div id="alert-panel">
     <div id="alert-panel-header">
@@ -357,23 +400,63 @@ LIVE_MAP_HTML = f"""
     return path;
   }}
 
-  const alertLog = [];
-  let logDirty = false;
-  let threatCount = 0;
+  // Pre-fill the log from the saved history on disk (newest first) so it
+  // persists across slider moves, reruns, and reboots. New tracer arrivals are
+  // still appended on top as they land.
+  const CLEAR_LOG = {clear_log_js};
+  const ALERT_HISTORY = CLEAR_LOG ? [] : {alert_history_json};
+  const alertLog = ALERT_HISTORY.slice().reverse();
+  let threatCount = alertLog.filter(e => e.attack !== 'BENIGN').length;
+  let logDirty = true;
 
+  // The ONLY place that appends to the log. Called exactly once per tracer,
+  // from the arrival check in updateMap(). Do not call it anywhere else.
   function addToLog(p) {{
     const t = new Date();
     const ts = t.toLocaleTimeString('en-US', {{hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit'}});
     if (p.attack !== 'BENIGN') threatCount++;
-    alertLog.unshift({{ time:ts, srcIp:p.srcIp, dstIp:p.dstIp, attack:p.attack, confidence:p.confidence }});
+    alertLog.unshift({{ time:ts, ts:t.toISOString(), srcIp:p.srcIp, dstIp:p.dstIp, attack:p.attack, confidence:p.confidence }});
     if (alertLog.length > 100) alertLog.pop();
     logDirty = true;
+    saveLog();
+  }}
+
+  // Persist the log to disk via serve_events.py so it survives a browser refresh
+  // or reboot. Saved oldest-first to match the file format the dashboard reads.
+  function saveLog() {{
+    try {{
+      fetch('http://127.0.0.1:8000/save_alerts', {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify(alertLog.slice().reverse()),
+      }});
+    }} catch (err) {{ /* server down; the in-page log is still fine */ }}
+  }}
+
+  // If Clear log was just pressed, overwrite disk with the now-empty log a few
+  // times over the first second. This wins the race against the previous iframe
+  // (which may still POST its old log once before it is torn down).
+  if (CLEAR_LOG) {{
+    saveLog();
+    setTimeout(saveLog, 300);
+    setTimeout(saveLog, 800);
   }}
 
   function renderLog() {{
     const tbody = document.getElementById('alert-tbody');
-    document.getElementById('alert-count').textContent = threatCount + ' threat' + (threatCount !== 1 ? 's' : '') + ' detected';
     const threats = alertLog.filter(e => e.attack !== 'BENIGN');
+    document.getElementById('alert-count').textContent = threats.length + ' threat' + (threats.length !== 1 ? 's' : '') + ' detected';
+
+    // Summary cards are computed from the SAME threats array as the log, so they
+    // are always exactly 1:1 with the rows shown below.
+    const types = new Set(threats.map(e => e.attack));
+    const sources = new Set(threats.map(e => e.srcIp));
+    const avg = threats.length ? threats.reduce((s, e) => s + (e.confidence || 0), 0) / threats.length : 0;
+    document.getElementById('sum-threats').textContent = threats.length;
+    document.getElementById('sum-types').textContent = types.size;
+    document.getElementById('sum-sources').textContent = sources.size;
+    document.getElementById('sum-conf').textContent = threats.length ? (avg * 100).toFixed(0) + '%' : 'N/A';
+
     if (threats.length === 0) {{
       tbody.innerHTML = '<tr><td colspan="5" style="color:#475569;text-align:center;padding:16px;">No threats detected yet...</td></tr>';
       return;
@@ -391,7 +474,6 @@ LIVE_MAP_HTML = f"""
   }}
 
   let livePackets = [];
-  let eventIndex = 0;
 
   const waitForDeck = setInterval(() => {{
     if (!window.deck) return;
@@ -411,14 +493,11 @@ LIVE_MAP_HTML = f"""
 
     const deckgl = new DeckGL({{
       container:"live-map", views: new MapView({{repeat:true}}),
-      initialViewState:{{ longitude:-20, latitude:30, zoom:2, pitch:0, bearing:0 }},
+      initialViewState:{{ longitude:-95, latitude:39, zoom:2, pitch:0, bearing:0 }},
       controller:{{ minZoom:1.2 }}, layers:[basemap]
     }});
 
-    function spawnNext() {{
-      if (MODEL_EVENTS.length === 0) return;
-      const evt = MODEL_EVENTS[eventIndex % MODEL_EVENTS.length];
-      eventIndex++;
+    function spawnEvent(evt) {{
       const src = ipToSrc(evt.srcIp);
       livePackets.push({{
         ts: Date.now(),
@@ -443,7 +522,7 @@ LIVE_MAP_HTML = f"""
         const age = now - p.ts;
         const progress = Math.min(1, age / DRAW_MS);
         const drawing = progress < 0.99;
-        if (!drawing && !p.arrivedAt) {{ p.arrivedAt = now; addToLog(p); }}
+        if (!drawing && !p.arrivedAt) {{ p.arrivedAt = now; addToLog(p); }}  // one alert per tracer, on arrival
         const opacity = drawing ? 1.0 : Math.max(0, 1 - (now - p.arrivedAt) / FADE_MS);
         if (opacity <= 0) return;
 
@@ -476,14 +555,28 @@ LIVE_MAP_HTML = f"""
     function animLoop() {{ updateMap(); requestAnimationFrame(animLoop); }}
     requestAnimationFrame(animLoop);
 
-    function scheduleNext() {{
-      if (MODEL_EVENTS.length === 0) return;
-      const evt = MODEL_EVENTS[eventIndex % MODEL_EVENTS.length];
-      const isThreat = evt && evt.attack !== 'BENIGN';
-      spawnNext();
-      setTimeout(scheduleNext, isThreat ? 250 : 700);
+    // Fetch live_events.json directly from serve_events.py every 2s. Because this
+    // happens inside the iframe, the Streamlit page never reloads and the map
+    // view (pan/zoom) is never reset. Every poll, fire a tracer for each attack
+    // currently in live_events.json. capture.py keeps rewriting that file while an
+    // attack is active, so an ongoing attack strikes the map again every poll, and
+    // the alert log gets exactly one row per tracer (1:1) when each tracer lands.
+    const EVENTS_URL = 'http://127.0.0.1:8000/live_events.json';
+
+    async function pollEvents() {{
+      try {{
+        const resp = await fetch(EVENTS_URL + '?t=' + Date.now());
+        if (resp.ok) {{
+          const data = await resp.json();
+          data.forEach(e => {{
+            if (e.attack === 'BENIGN') return;
+            spawnEvent(e);   // every detection -> one tracer -> one alert
+          }});
+        }}
+      }} catch (err) {{ /* server not running yet; try again next tick */ }}
     }}
-    scheduleNext();
+    pollEvents();
+    setInterval(pollEvents, 2000);
 
     setInterval(() => {{ if (logDirty) {{ logDirty = false; renderLog(); }} }}, 100);
   }}, 100);
@@ -492,38 +585,53 @@ LIVE_MAP_HTML = f"""
 </html>
 """
 
-components.html(LIVE_MAP_HTML, height=720, scrolling=False)
+components.html(LIVE_MAP_HTML, height=790, scrolling=False)
 
 # ---------------------------------------------------------------------------
 # CHARTS
 # ---------------------------------------------------------------------------
 
-left, right = st.columns(2)
+_chart_title, _chart_btn = st.columns([4, 1], vertical_alignment="center")
+with _chart_title:
+    st.markdown('<div class="section-title" style="margin:0;border:none;padding:0;">Analytics</div>', unsafe_allow_html=True)
+with _chart_btn:
+    # Re-reads alert_history.json and redraws the charts on demand (one rerun,
+    # no repeating page-reload flash).
+    st.button("↻ Refresh charts", use_container_width=True)
 
-with left:
-    st.markdown('<div class="section-title">Threats by Type</div>', unsafe_allow_html=True)
-    type_counts = threats["Classification"].value_counts().reset_index()
-    type_counts.columns = ["Attack Type", "Count"]
-    fig1 = px.bar(type_counts, x="Attack Type", y="Count", color="Attack Type", color_discrete_map=color_map)
-    fig1.update_layout(**chart_layout, showlegend=False)
-    fig1.update_traces(marker_line_width=0)
-    fig1.update_xaxes(gridcolor="#1e293b")
-    fig1.update_yaxes(gridcolor="#1e293b")
-    st.plotly_chart(fig1, use_container_width=True, config={"displayModeBar": False})
+# All charts are built from the real captured attacks (captured_threats).
+if captured_threats.empty:
+    st.info("No attacks captured yet. Run capture.py, then click ↻ Refresh charts.")
+else:
+    left, right = st.columns(2)
 
-with right:
-    st.markdown('<div class="section-title">Threat Distribution</div>', unsafe_allow_html=True)
-    fig2 = px.pie(type_counts, values="Count", names="Attack Type", color="Attack Type", color_discrete_map=color_map, hole=0.45)
-    fig2.update_layout(**chart_layout)
-    fig2.update_traces(textfont_color="#e2e8f0", textinfo="percent+label")
-    st.plotly_chart(fig2, use_container_width=True, config={"displayModeBar": False})
+    with left:
+        st.markdown('<div class="section-title">Threats by Type</div>', unsafe_allow_html=True)
+        type_counts = captured_threats["Classification"].value_counts().reset_index()
+        type_counts.columns = ["Attack Type", "Count"]
+        fig1 = px.bar(type_counts, x="Attack Type", y="Count", color="Attack Type", color_discrete_map=color_map)
+        fig1.update_layout(**chart_layout, showlegend=False)
+        fig1.update_traces(marker_line_width=0)
+        fig1.update_xaxes(gridcolor="#1e293b")
+        fig1.update_yaxes(gridcolor="#1e293b")
+        st.plotly_chart(fig1, use_container_width=True, config={"displayModeBar": False})
 
-st.markdown('<div class="section-title">Threat Activity (Last 24 Hours)</div>', unsafe_allow_html=True)
-threats_timeline = threats.copy()
-threats_timeline["Hour"] = threats_timeline["Timestamp"].dt.floor("h")
-hourly = threats_timeline.groupby(["Hour", "Classification"]).size().reset_index(name="Count")
-fig3 = px.area(hourly, x="Hour", y="Count", color="Classification", color_discrete_map=color_map)
-fig3.update_layout(**chart_layout, height=300)
-fig3.update_xaxes(gridcolor="#1e293b")
-fig3.update_yaxes(gridcolor="#1e293b")
-st.plotly_chart(fig3, use_container_width=True, config={"displayModeBar": False})
+    with right:
+        st.markdown('<div class="section-title">Threat Distribution</div>', unsafe_allow_html=True)
+        fig2 = px.pie(type_counts, values="Count", names="Attack Type", color="Attack Type", color_discrete_map=color_map, hole=0.45)
+        fig2.update_layout(**chart_layout)
+        fig2.update_traces(textfont_color="#e2e8f0", textinfo="percent+label")
+        st.plotly_chart(fig2, use_container_width=True, config={"displayModeBar": False})
+
+    st.markdown('<div class="section-title">Threat Activity</div>', unsafe_allow_html=True)
+    threats_timeline = captured_threats.dropna(subset=["Timestamp"]).copy()
+    if threats_timeline.empty:
+        st.caption("Not enough timestamped data to plot activity yet.")
+    else:
+        threats_timeline["Minute"] = threats_timeline["Timestamp"].dt.floor("min")
+        hourly = threats_timeline.groupby(["Minute", "Classification"]).size().reset_index(name="Count")
+        fig3 = px.area(hourly, x="Minute", y="Count", color="Classification", color_discrete_map=color_map)
+        fig3.update_layout(**chart_layout, height=300)
+        fig3.update_xaxes(gridcolor="#1e293b")
+        fig3.update_yaxes(gridcolor="#1e293b")
+        st.plotly_chart(fig3, use_container_width=True, config={"displayModeBar": False})
