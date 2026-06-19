@@ -34,4 +34,4 @@ Because the dataset is large, it is not stored in this repository. Each team mem
 4. Keep large files and raw data out of GitHub
 
 ## Current Status
-Initial project structure and repository setup are in progress.
+Project is completed. 
