@@ -1,5 +1,15 @@
 pandas
+numpy
 streamlit
 plotly
 scikit-learn
 joblib
+scapy
+json
+os
+time
+threading
+collections
+datetime
+http.server
+socketserver
